@@ -16,6 +16,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import org.tensorflow.lite.DataType
 import org.tensorflow.lite.Interpreter
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
