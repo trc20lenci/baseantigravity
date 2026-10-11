@@ -116,7 +116,6 @@ fun TextToolbar(
     onBack: () -> Unit, onSub: (TextSub?) -> Unit, onEditText: () -> Unit, onSplit: () -> Unit, onDelete: () -> Unit,
     onChange: ((TextClip) -> TextClip) -> Unit, onStyle: (com.base.editor.text.TextStyles.Preset) -> Unit,
     onAnimation: (com.base.editor.text.TextAnimation) -> Unit, onImportPag: (android.net.Uri) -> Unit,
-    voice: com.base.editor.tts.TtsVoice, voiceBusy: Boolean, onVoice: (com.base.editor.tts.TtsVoice) -> Unit, onSpeak: () -> Unit,
 ) {
     androidx.compose.animation.Crossfade(sub, animationSpec = androidx.compose.animation.core.tween(160, easing = androidx.compose.animation.core.CubicBezierEasing(0.23f, 1f, 0.32f, 1f)), label = "textSub") { cur ->
         if (cur == null) {
@@ -128,7 +127,6 @@ fun TextToolbar(
                 PanelAction("Стили", Lucide.Paintbrush) { onSub(TextSub.STYLES) }
                 PanelAction("Анимация", Lucide.Sparkles) { onSub(TextSub.ANIMATION) }
                 PanelAction("Цвет", Lucide.Palette) { onSub(TextSub.COLOR) }
-                PanelAction("Озвучить", Lucide.AudioLines) { onSub(TextSub.VOICE) }
                 PanelAction("Удалить", Lucide.Trash2, onClick = onDelete)
             }
         } else {
@@ -154,24 +152,7 @@ fun TextToolbar(
                                 Chip(false, { picker.launch(arrayOf("*/*")) }) { Text("+ .pag", fontSize = 13.sp, color = Color.White) }
                             }
                         }
-                        TextSub.VOICE -> {
-                            // голоса Piper: тап по имени — выбрать (модель тихо качается), «Озвучить» — создать звук на аудиодорожке
-                            items(com.base.editor.tts.TtsVoice.entries.toList(), key = { it.id }) { v ->
-                                Chip(voice == v, { onVoice(v) }) { Text(v.label, fontSize = 13.sp, color = chipText(voice == v)) }
-                            }
-                            item {
-                                Box(
-                                    Modifier.height(44.dp).clip(RoundedCornerShape(12.dp)).background(BaseColors.Primary)
-                                        .pressable(enabled = !voiceBusy, onClick = onSpeak).padding(horizontal = 16.dp),
-                                    contentAlignment = Alignment.Center,
-                                ) {
-                                    if (voiceBusy) Row(verticalAlignment = Alignment.CenterVertically) {
-                                        androidx.compose.material3.CircularProgressIndicator(Modifier.size(18.dp), color = Color.Black, strokeWidth = 2.dp)
-                                        Text("  Озвучивание…", fontSize = 13.sp, color = Color.Black, fontWeight = FontWeight.SemiBold)
-                                    } else Text("Озвучить", fontSize = 14.sp, color = Color.Black, fontWeight = FontWeight.SemiBold)
-                                }
-                            }
-                        }
+                        TextSub.VOICE -> Unit
                         TextSub.COLOR -> {
                             items(TEXT_COLORS, key = { it }) { c ->
                                 Box(Modifier.pressable { onChange { it.copy(textColor = c) } }.size(34.dp).clip(CircleShape).background(Color(c))

@@ -85,8 +85,9 @@ fun CropDialog(frame: ImageBitmap?, initial: CropRect, onDone: (CropRect?) -> Un
                     val on = p == preset
                     Box(
                         Modifier.pressable {
-                                preset = p
-                                if (frame != null && p.ratio != null) rect = fitRatio(frame.width.toFloat() / frame.height, p.ratio, rect)
+                                // повторный тап по выбранной пропорции снимает её; «Свободный» всегда полностью снимает блокировку
+                                preset = if (p == preset && p != CropPreset.FREE) CropPreset.FREE else p
+                                if (frame != null && preset.ratio != null) rect = fitRatio(frame.width.toFloat() / frame.height, preset.ratio!!, rect)
                             }.weight(1f).clip(RoundedCornerShape(10.dp))
                             .background(animatedSelectColor(on, offColor = Color.White.copy(alpha = .1f)))
                             .padding(vertical = 12.dp),

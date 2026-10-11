@@ -307,17 +307,10 @@ fun BgPanel(
                 Pill(if (hasMask) "Применить" else "Удалить фон", true) { onStart(false) }
             }
             else -> {
-                Text("Фон", color = BaseColors.MutedOnDark, fontSize = 12.sp)
+                Text("Убранный фон заливается цветом (под основной дорожкой слоёв нет); у наложений он становится прозрачным", color = BaseColors.MutedOnDark, fontSize = 11.sp)
                 Row(Modifier.padding(vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Pill("Цвет", bg.mode == BgMode.COLOR) { onChange { it.copy(mode = BgMode.COLOR) }; onDone() }
-                    Pill("Размытие", bg.mode == BgMode.BLUR) { onChange { it.copy(mode = BgMode.BLUR) }; onDone() }
+                    BG_COLORS.forEach { c -> Swatch(c, bg.bgColor == c) { onChange { it.copy(mode = BgMode.COLOR, bgColor = c) }; onDone() } }
                 }
-                if (bg.mode == BgMode.COLOR) {
-                    Text("Прозрачная область заливается цветом (под основной дорожкой слоёв нет)", color = BaseColors.MutedOnDark, fontSize = 11.sp)
-                    Row(Modifier.padding(vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        BG_COLORS.forEach { c -> Swatch(c, bg.bgColor == c) { onChange { it.copy(bgColor = c) }; onDone() } }
-                    }
-                } else LabeledSlider("Сила размытия", bg.blur, { v -> onChange { it.copy(blur = v) } }, onDone)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("Обводка контура", color = Color.White, fontSize = 14.sp, modifier = Modifier.weight(1f))
                     Switch(bg.outline, { on -> onChange { it.copy(outline = on) }; onDone() }, colors = SwitchDefaults.colors(checkedTrackColor = BaseColors.Primary, checkedThumbColor = Color.Black))

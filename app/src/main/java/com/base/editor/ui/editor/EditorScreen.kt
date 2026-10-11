@@ -158,8 +158,7 @@ fun EditorScreen(onClose: () -> Unit, onAddMedia: () -> Unit, vm: EditorViewMode
     val mediaTool by vm.mediaTool.collectAsStateWithLifecycle()
     val bgJob by vm.bgJob.collectAsStateWithLifecycle()
     val bgBar by vm.bgBarOpen.collectAsStateWithLifecycle()
-    val ttsVoiceSel by vm.ttsVoice.collectAsStateWithLifecycle()
-    val ttsBusySel by vm.ttsBusy.collectAsStateWithLifecycle()
+    val ttsOpen by vm.ttsSheetOpen.collectAsStateWithLifecycle()
     val canvasBgSel by vm.canvasBg.collectAsStateWithLifecycle()
     val pagTemplates by vm.pagTemplates.collectAsStateWithLifecycle()
 
@@ -181,6 +180,7 @@ fun EditorScreen(onClose: () -> Unit, onAddMedia: () -> Unit, vm: EditorViewMode
         when {
             fullscreen -> fullscreen = false
             exportSheet -> vm.closeExportSheet()
+            ttsOpen -> vm.closeTtsSheet()
             textSub != null -> vm.setTextSub(null)
             bgBar -> vm.closeBgBar()
             mediaTool != null -> vm.closeMediaTool()
@@ -200,6 +200,12 @@ fun EditorScreen(onClose: () -> Unit, onAddMedia: () -> Unit, vm: EditorViewMode
         onDismiss = vm::closeExportSheet,
         onStart = { res, fps -> vm.setResolution(res); vm.setExportFps(fps); vm.closeExportSheet(); vm.startExport() },
     )
+    if (ttsOpen) {
+        val voice by vm.ttsVoice.collectAsStateWithLifecycle()
+        val busy by vm.ttsBusy.collectAsStateWithLifecycle()
+        val text by vm.ttsText.collectAsStateWithLifecycle()
+        TtsSheet(text, voice, busy, onText = vm::setTtsText, onVoice = vm::setTtsVoice, onGenerate = vm::generateSpeech, onDismiss = vm::closeTtsSheet)
+    }
     val cropId by vm.cropClipId.collectAsStateWithLifecycle()
     if (cropId != null) {
         val frame by vm.cropFrame.collectAsStateWithLifecycle()
@@ -247,6 +253,7 @@ fun EditorScreen(onClose: () -> Unit, onAddMedia: () -> Unit, vm: EditorViewMode
                                 ToolButton(Lucide.Music, "Звук", onClick = vm::addAudio)
                                 ToolButton(Lucide.Type, "Текст", onClick = vm::openNewText)
                                 ToolButton(Lucide.Captions, "Субтитры", onClick = vm::openCaptions)
+                                ToolButton(Lucide.AudioLines, "Озвучка", onClick = vm::openTtsSheet)
                                 ToolButton(Lucide.Ratio, "Формат", onClick = vm::openFormat)
                                 ToolButton(Lucide.Layers, "Наложение", onClick = vm::addOverlay)
                                 ToolButton(Lucide.Image, "Фон", onClick = vm::openBgBar)
@@ -276,7 +283,6 @@ fun EditorScreen(onClose: () -> Unit, onAddMedia: () -> Unit, vm: EditorViewMode
                                     onBack = { vm.select(null) }, onSub = vm::setTextSub, onEditText = vm::openTextInput,
                                     onSplit = vm::splitText, onDelete = vm::deleteText, onChange = vm::editText,
                                     onStyle = vm::applyTextStyle, onAnimation = vm::applyTextAnimation, onImportPag = vm::importPag,
-                                    voice = ttsVoiceSel, voiceBusy = ttsBusySel, onVoice = vm::setTtsVoice, onSpeak = vm::speakSelectedText,
                                 )
                             }
                             ToolMode.CAPTION -> ToolRow {
@@ -403,6 +409,7 @@ private fun PreviewStage(
     val cropClip by vm.cropClipId.collectAsStateWithLifecycle()
     val clips by vm.clips.collectAsStateWithLifecycle()
     val scrubOn by vm.scrubOverlayOn.collectAsStateWithLifecycle()
+    val playerNow by vm.controller.playerFlow.collectAsStateWithLifecycle()
     val scrubFrame by vm.scrubFrame.collectAsStateWithLifecycle()
     val bgSel by vm.canvasBg.collectAsStateWithLifecycle()
     val cover by vm.overlayCover.collectAsStateWithLifecycle()
@@ -420,11 +427,12 @@ private fun PreviewStage(
                         useController = false
                         resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                         setShutterBackgroundColor(android.graphics.Color.BLACK)
-                        player = vm.controller.player
+                        player = playerNow
                     }
                 },
                 update = {
                     it.resizeMode = if (pending) AspectRatioFrameLayout.RESIZE_MODE_ZOOM else AspectRatioFrameLayout.RESIZE_MODE_FIT
+                    if (it.player !== playerNow) it.player = playerNow                      // плеер пересоздаётся при появлении наложений
                 },
                 modifier = Modifier.fillMaxSize(),
             )

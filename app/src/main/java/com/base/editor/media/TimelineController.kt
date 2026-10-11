@@ -58,7 +58,35 @@ class TimelineController(
     private val textTrack = TextTrack()
     private val factory = CompositionFactory(context.applicationContext, catalog)
 
-    val player: CompositionPlayer = CompositionPlayer.Builder(context.applicationContext).build().also { it.addListener(this) }
+    private val appContext = context.applicationContext
+    private var playerMulti = false
+
+    /**
+     * Плеер превью. Для обычного проекта — стандартный (один видеопоток). Для проекта с наложениями нужен граф с НЕСКОЛЬКИМИ
+     * видеовходами: у стандартного CompositionPlayer граф однопоточный, и композиция с двумя видео-последовательностями
+     * падает с ERROR_CODE_FAILED_RUNTIME. Поэтому плеер при необходимости пересоздаётся (см. [ensurePlayer]).
+     */
+    var player: CompositionPlayer = createPlayer(false)
+        private set
+    private val _playerFlow = MutableStateFlow(player)
+    val playerFlow: StateFlow<CompositionPlayer> = _playerFlow.asStateFlow()
+
+    private fun createPlayer(multi: Boolean): CompositionPlayer {
+        val b = CompositionPlayer.Builder(appContext)
+        if (multi) b.setVideoGraphFactory(androidx.media3.effect.MultipleInputVideoGraph.Factory(androidx.media3.effect.DefaultVideoFrameProcessor.Factory.Builder().build()))
+        return b.build().also { it.addListener(this); it.volume = if (muted) 0f else 1f }
+    }
+
+    private fun ensurePlayer(multi: Boolean) {
+        if (multi == playerMulti) return
+        val old = player
+        old.removeListener(this)
+        runCatching { old.release() }
+        playerMulti = multi
+        playerReady = false
+        player = createPlayer(multi)
+        _playerFlow.value = player
+    }
 
     private val _state = MutableStateFlow(TimelineState(emptyList(), emptyList()))
     val state: StateFlow<TimelineState> = _state.asStateFlow()
@@ -134,10 +162,13 @@ class TimelineController(
     }
 
     // ───────── загрузка ─────────
-    fun load(serialized: String?) {
+    /** [rebuild] = false — только загрузить модель: первую сборку делаем позже, когда известны пропорции холста (иначе видео сначала собирается в 9:16 и «сжимается»). */
+    fun load(serialized: String?, rebuild: Boolean = true) {
         if (serialized != null) model.load(serialized)
-        publish(); requestRebuild()
+        publish(); if (rebuild) requestRebuild()
     }
+
+    fun rebuildNow() = requestRebuild()
 
     fun serialize(): String = model.serialize()
 
@@ -485,6 +516,7 @@ class TimelineController(
         try {
             playerReady = false                                  // пока новая композиция готовится — seek откладывается
             if (composition == null) { player.stop(); return }
+            ensurePlayer(composition.sequences.count { C.TRACK_TYPE_VIDEO in it.trackTypes } > 1)
             pendingSeekMs = _playhead.value
             player.setComposition(composition, _playhead.value)
             player.prepare()
@@ -542,7 +574,8 @@ class TimelineController(
             _events.tryEmit("Проблема с декодером или GPU — переходы временно отключены")
             requestRebuild()
         } else {
-            _events.tryEmit("Не удалось воспроизвести: ${error.errorCodeName}")
+            val root = generateSequence<Throwable>(error) { it.cause }.last()
+            _events.tryEmit("Не удалось воспроизвести: ${error.errorCodeName} (${root.javaClass.simpleName}: ${root.message?.take(80)})")
         }
     }
 

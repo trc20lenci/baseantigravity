@@ -170,7 +170,7 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
         val clip = clips.value.firstOrNull { it.row == 0 && it.type != com.base.editor.core.MediaType.AUDIO && t >= it.startMs && t < it.endMs } ?: return
         val local = t - clip.startMs
         scrubHideJob?.cancel(); scrubOverlayOn.value = true; overlayCover.value = true
-        scrubFrames.request(clip, local, true, controller.state.value.transformAt(clip.id, local), controller.cropOf(clip.id))
+        scrubFrames.request(clip, local, true, controller.state.value.transformAt(clip.id, local), controller.cropOf(clip.id), controller.state.value.chromas[clip.id], controller.state.value.bgs[clip.id])
         val v0 = controller.appliedVersion.value
         snapshotJob?.cancel()
         snapshotJob = viewModelScope.launch {
@@ -202,13 +202,14 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
         viewModelScope.launch { controller.appliedVersion.collect { displayAspect.value = videoAspect } }
         viewModelScope.launch {
             val saved = repo.loadTimeline(projectId)
-            controller.load(saved)
+            controller.load(saved, rebuild = false)       // первая сборка — после определения пропорций холста
             format.value = com.base.editor.core.CanvasFormat.of(repo.loadFormat(projectId))
             canvasBg.value = com.base.editor.core.CanvasBg.of(repo.loadBg(projectId)); controller.setCanvasBg(canvasBg.value)
             captions.load(repo.loadCaptions(projectId))
             controller.loadTexts(repo.loadTexts(projectId))
             withContext(dispatchers.default) { detectAspect() }      // чтение метаданных — не на главном потоке
             applyCanvas()
+            controller.rebuildNow()
             isLoading.value = false
         }
         viewModelScope.launch { controller.events.collect { events.value = it } }
@@ -303,7 +304,7 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
         val clip = clips.value.firstOrNull { it.row == 0 && it.type != com.base.editor.core.MediaType.AUDIO && t >= it.startMs && t < it.endMs } ?: return
         scrubHideJob?.cancel(); scrubOverlayOn.value = true
         val local = t - clip.startMs
-        scrubFrames.request(clip, local, exact, controller.state.value.transformAt(clip.id, local), controller.cropOf(clip.id))
+        scrubFrames.request(clip, local, exact, controller.state.value.transformAt(clip.id, local), controller.cropOf(clip.id), controller.state.value.chromas[clip.id], controller.state.value.bgs[clip.id])
     }
 
     /** Курсор «считывает» ромбики выбранного клипа: рядом с ключом (±8 px шкалы) скраб прилипает к нему. */
@@ -622,7 +623,7 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
             // начало жеста: показываем кадр клипа картинкой поверх плеера — она следует за пальцами в реальном времени
             val local = (playheadMs.value - clip.startMs).coerceAtLeast(0L)
             scrubHideJob?.cancel(); scrubOverlayOn.value = true
-            scrubFrames.request(clip, local, true, baked, controller.cropOf(clipId))
+            scrubFrames.request(clip, local, true, baked, controller.cropOf(clipId), controller.state.value.chromas[clipId], controller.state.value.bgs[clipId])
         }
         liveClipTransform.value = LiveClip(clipId, baked, transform)
         if (clip.row != 0) controller.refreshLive()
@@ -670,7 +671,7 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
     /** Кнопка «Текст»: создаёт слой на позиции курсора, выделяет его и открывает строку ввода. */
     fun openNewText() {
         controller.pause()
-        val clip = TextClip(text = "Текст", startMs = playheadMs.value).let { TextStyles.byId("plain")!!.apply(it) }
+        val clip = TextClip(text = "", startMs = playheadMs.value).let { TextStyles.byId("plain")!!.apply(it) }
         controller.addText(clip)
         select(null); canvasTextId.value = clip.id
         textInputOpen.value = true
@@ -721,7 +722,12 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
 
     fun setTextSub(v: TextSub?) { textSub.value = v }
     fun openTextInput() { textInputOpen.value = true }
-    fun closeTextInput() { textInputOpen.value = false }
+    /** Ввод закончен: если текст пустой — слой убираем (новый слой стартует пустым, чтобы слово «Текст» не приходилось стирать). */
+    fun closeTextInput() {
+        textInputOpen.value = false
+        val c = selectedTextClip ?: return
+        if (c.text.isBlank()) { controller.removeText(c.id); canvasTextId.value = null; textSub.value = null }
+    }
     fun setTextValue(t: String) = editText { it.copy(text = t) }
 
     /** «Разделить»: текстовый блок режется по курсору на две независимые части. */
@@ -760,18 +766,26 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
         viewModelScope.launch { runCatching { tts.prefetch(v) } }          // голос тихо скачивается заранее
     }
 
-    /** «Озвучить»: текст выделенного слоя → голос Piper → звуковой блок на аудиодорожке, начиная с начала текстового слоя. */
-    fun speakSelectedText() {
-        val clip = selectedTextClip ?: return
-        if (clip.text.isBlank()) { events.value = "Сначала введите текст"; return }
+    val ttsSheetOpen = MutableStateFlow(false)
+    val ttsText = MutableStateFlow("")
+    fun openTtsSheet() { controller.pause(); select(null); ttsSheetOpen.value = true; setTtsVoice(ttsVoice.value) }
+    fun closeTtsSheet() { ttsSheetOpen.value = false }
+    fun setTtsText(t: String) { ttsText.value = t }
+
+    /** «Сгенерировать»: введённый текст → голос Piper → звуковой блок на аудиодорожке от позиции курсора. */
+    fun generateSpeech() {
+        val text = ttsText.value
+        if (text.isBlank()) { events.value = "Введите текст для озвучки"; return }
         if (ttsBusy.value) return
         ttsBusy.value = true
+        val start = playheadMs.value
         ttsJob = viewModelScope.launch {
             try {
-                val r = tts.synthesize(ttsVoice.value, clip.text)
-                controller.addAudio(android.net.Uri.fromFile(r.file).toString(), r.durationMs, startMs = clip.startMs)
+                val r = tts.synthesize(ttsVoice.value, text)
+                controller.addAudio(android.net.Uri.fromFile(r.file).toString(), r.durationMs, startMs = start)
                 HapticBus.emit(Haptic.SUCCESS)
                 events.value = "Озвучка добавлена на аудиодорожку"
+                ttsSheetOpen.value = false
             } catch (e: kotlinx.coroutines.CancellationException) { throw e
             } catch (e: Exception) {
                 android.util.Log.e("BaseTts", "озвучка", e)

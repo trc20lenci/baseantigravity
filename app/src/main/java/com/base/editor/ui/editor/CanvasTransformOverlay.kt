@@ -96,6 +96,7 @@ fun CanvasTransformOverlay(
                     var accPan = Offset.Zero; var accZoom = 1f; var accRot = 0f
                     var base: CanvasTarget? = null                 // состояние элемента на момент начала жеста
                     var rotSnapped = false
+                    var lastClip: ClipTransform? = null; var lastText: TextClip? = null
                     do {
                         val event = awaitPointerEvent()
                         val pan = event.calculatePan(); val zoom = event.calculateZoom(); val rot = event.calculateRotation()
@@ -109,37 +110,49 @@ fun CanvasTransformOverlay(
                         if (transforming && b != null && event.changes.any { it.pressed }) {
                             val w = size.width.toFloat(); val h = size.height.toFloat()
                             dragging = true
-                            // порог притяжения к центру: ~10 dp, плюс «липкий» поворот к 0/90/180/270 в пределах 3°
-                            val tx = 10.dp.toPx() / w; val ty = 10.dp.toPx() / h
-                            fun nearRight(raw: Float): Float { val k = Math.round(raw / 90f) * 90f; return if (abs(raw - k) < 3f) k else raw }
+                            // Движение свободное: положение и поворот НИЧЕГО не «магнитят» на ходу. Линии лишь подсвечиваются и
+                            // слегка вибрируют, когда элемент оказался в нескольких dp от центра; ровно он встаёт при отпускании.
+                            val tx = NEAR_DP.dp.toPx() / w; val ty = NEAR_DP.dp.toPx() / h
+                            fun nearRight(raw: Float): Boolean { val k = Math.round(raw / 90f) * 90f; return abs(raw - k) < 1.5f }
                             when (b) {
-                                // как в MultiTouchListener: от исходного состояния + суммарная дельта жеста
                                 is CanvasTarget.Clip -> {
-                                    var nx = b.transform.x + accPan.x / w; var ny = b.transform.y + accPan.y / h
-                                    val sx = abs(nx) < tx; val sy = abs(ny) < ty
-                                    if (sx) nx = 0f; if (sy) ny = 0f
+                                    val nx = b.transform.x + accPan.x / w; val ny = b.transform.y + accPan.y / h
                                     val rawRot = b.transform.rotationDeg + accRot
-                                    val rot = nearRight(rawRot); val rs = rot != rawRot
+                                    val sx = abs(nx) < tx; val sy = abs(ny) < ty; val rs = nearRight(rawRot)
                                     if ((sx && !snapX) || (sy && !snapY) || (rs && !rotSnapped)) view.haptic(Haptic.SNAP)
                                     snapX = sx; snapY = sy; rotSnapped = rs
-                                    act.onClipTransform(b.id, b.transform.copy(x = nx, y = ny, scale = b.transform.scale * accZoom, rotationDeg = rot).sane())
+                                    lastClip = b.transform.copy(x = nx, y = ny, scale = b.transform.scale * accZoom, rotationDeg = rawRot).sane()
+                                    act.onClipTransform(b.id, lastClip!!)
                                 }
                                 is CanvasTarget.Text -> {
-                                    var px = (b.clip.positionX + accPan.x / w).coerceIn(-0.2f, 1.2f); var py = (b.clip.positionY + accPan.y / h).coerceIn(-0.2f, 1.2f)
-                                    val sx = abs(px - 0.5f) < tx; val sy = abs(py - 0.5f) < ty
-                                    if (sx) px = 0.5f; if (sy) py = 0.5f
+                                    val px = (b.clip.positionX + accPan.x / w).coerceIn(-0.2f, 1.2f); val py = (b.clip.positionY + accPan.y / h).coerceIn(-0.2f, 1.2f)
                                     val rawRot = b.clip.rotationDeg + accRot
-                                    val rot = nearRight(rawRot); val rs = rot != rawRot
+                                    val sx = abs(px - 0.5f) < tx; val sy = abs(py - 0.5f) < ty; val rs = nearRight(rawRot)
                                     if ((sx && !snapX) || (sy && !snapY) || (rs && !rotSnapped)) view.haptic(Haptic.SNAP)
                                     snapX = sx; snapY = sy; rotSnapped = rs
-                                    act.onTextTransform(b.clip.copy(positionX = px, positionY = py, fontSizeSp = (b.clip.fontSizeSp * accZoom).coerceIn(8f, 160f), rotationDeg = rot), b.isDraft)
+                                    lastText = b.clip.copy(positionX = px, positionY = py, fontSizeSp = (b.clip.fontSizeSp * accZoom).coerceIn(8f, 160f), rotationDeg = rawRot)
+                                    act.onTextTransform(lastText!!, b.isDraft)
                                 }
                             }
                             event.changes.forEach { it.consume() }
                         }
                     } while (event.changes.any { it.pressed })
 
-                    if (transforming) { act.onGestureEnd(); dragging = false; snapX = false; snapY = false }
+                    if (transforming) {
+                        // отпустили: если элемент почти по центру / поворот почти ровный — ставим в точности ровно
+                        val b = base; val w = size.width.toFloat(); val h = size.height.toFloat()
+                        val ex = SETTLE_DP.dp.toPx() / w; val ey = SETTLE_DP.dp.toPx() / h
+                        fun settleRot(r: Float): Float { val k = Math.round(r / 90f) * 90f; return if (abs(r - k) < 2.5f) k else r }
+                        if (b is CanvasTarget.Clip) lastClip?.let { c ->
+                            val f = c.copy(x = if (abs(c.x) < ex) 0f else c.x, y = if (abs(c.y) < ey) 0f else c.y, rotationDeg = settleRot(c.rotationDeg))
+                            if (f != c) { act.onClipTransform(b.id, f); view.haptic(Haptic.SNAP) }
+                        }
+                        if (b is CanvasTarget.Text) lastText?.let { c ->
+                            val f = c.copy(positionX = if (abs(c.positionX - 0.5f) < ex) 0.5f else c.positionX, positionY = if (abs(c.positionY - 0.5f) < ey) 0.5f else c.positionY, rotationDeg = settleRot(c.rotationDeg))
+                            if (f != c) { act.onTextTransform(f, (b as CanvasTarget.Text).isDraft); view.haptic(Haptic.SNAP) }
+                        }
+                        act.onGestureEnd(); dragging = false; snapX = false; snapY = false
+                    }
                     else {
                         // тап: сверху вниз ищем текстовый слой под пальцем, иначе — видео
                         val hit = hitText(measurer, currentTexts, down.position, Size(size.width.toFloat(), size.height.toFloat()), this)
@@ -173,6 +186,10 @@ fun CanvasTransformOverlay(
         }
     }
 }
+
+/** Подсветка линий центра при приближении (dp) и точная постановка по центру при отпускании (dp). */
+private const val NEAR_DP = 5
+private const val SETTLE_DP = 7
 
 /** Размер кадра с соотношением [aspect], вписанного в холст w×h без растяжения (ContentScale.Fit). */
 internal fun fitSize(w: Float, h: Float, aspect: Float): Pair<Float, Float> {
