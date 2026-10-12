@@ -418,6 +418,7 @@ private fun PreviewStage(
     gl?.let { view ->
         // всё, что связано с жестом и кадром, идёт мимо композиции — напрямую в GL-вид
         LaunchedEffect(view) { vm.displayAspect.collect { view.setFrameAspect(it) } }
+        LaunchedEffect(view) { vm.canvasPx.collect { (w, h) -> view.setBufferSize(w, h) } }
         LaunchedEffect(view) {
             vm.liveClipTransform.collect { l ->
                 val isMain = l != null && vm.clips.value.firstOrNull { it.id == l.id }?.row == 0       // наложения «запечены» не в весь кадр

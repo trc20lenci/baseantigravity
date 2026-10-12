@@ -33,6 +33,8 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
     private val main = Handler(Looper.getMainLooper())
 
     @Volatile private var frameAspect = 9f / 16f
+    @Volatile private var bufW = 720
+    @Volatile private var bufH = 1280
     @Volatile private var baked: ClipTransform? = null
     @Volatile private var current: ClipTransform? = null
     @Volatile private var clearOnNextFrame = false
@@ -42,6 +44,16 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
         preserveEGLContextOnPause = true
         setRenderer(renderer)
         renderMode = RENDERMODE_WHEN_DIRTY
+    }
+
+    /**
+     * Размер буфера поверхности плеера = размер холста композиции. БЕЗ ЭТОГО у SurfaceTexture буфер крошечный, плеер рисует
+     * в него «пиксель», а на экране получается сплошное размытие и мигающие цвета.
+     */
+    fun setBufferSize(w: Int, h: Int) {
+        if (w < 2 || h < 2) return
+        bufW = w; bufH = h
+        queueEvent { renderer.applyBufferSize() }
     }
 
     /** Реальные пропорции кадров плеера (ширина / высота холста композиции). */
@@ -79,6 +91,7 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
             GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
             releaseSurface()
             val s = SurfaceTexture(texId)
+            s.setDefaultBufferSize(bufW, bufH)
             s.setOnFrameAvailableListener { frameReady.set(true); requestRender() }
             st = s; surface = Surface(s)
             val out = surface
@@ -129,6 +142,8 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
             GLES20.glDisableVertexAttribArray(aPos); GLES20.glDisableVertexAttribArray(aUv)
         }
+
+        fun applyBufferSize() { runCatching { st?.setDefaultBufferSize(bufW, bufH) } }
 
         private fun releaseSurface() {
             runCatching { surface?.release() }; runCatching { st?.release() }

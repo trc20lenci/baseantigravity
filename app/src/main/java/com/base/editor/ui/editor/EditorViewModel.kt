@@ -145,6 +145,8 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
     val displayAspect = MutableStateFlow(9f / 16f)
     /** Пропорции выбранного формата — для рамки предпросмотра: меняются мгновенно, одним кадром. */
     val canvasAspect = MutableStateFlow(9f / 16f)
+    /** Размер холста в пикселях — им задаётся буфер GL-поверхности превью. */
+    val canvasPx = MutableStateFlow(720 to 1280)
     val exportSheetOpen = MutableStateFlow(false)
     fun openExportSheet() { controller.pause(); exportSheetOpen.value = true }
     fun closeExportSheet() { exportSheetOpen.value = false }
@@ -249,7 +251,7 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
     fun closeFormat() { formatPanelOpen.value = false }
 
     private fun shortSide() = when (resolution.value) { "480p" -> 480; "1080p" -> 1080; else -> 720 }
-    private fun applyCanvas() { aspect = format.value.aspect ?: originalAspect; canvasAspect.value = aspect; controller.setCanvas(CompositionFactory.canvasFor(aspect, shortSide())) }
+    private fun applyCanvas() { aspect = format.value.aspect ?: originalAspect; canvasAspect.value = aspect; controller.setCanvas(CompositionFactory.canvasFor(aspect, shortSide())); canvasPx.value = controller.canvas.width to controller.canvas.height }
     fun setResolution(r: String) { resolution.value = r; applyCanvas() }
 
     private fun persist() {
