@@ -401,39 +401,44 @@ private fun PreviewStage(
     val playhead by vm.playheadMs.collectAsStateWithLifecycle()
     val total by vm.totalMs.collectAsStateWithLifecycle()
     val playing by vm.isPlaying.collectAsStateWithLifecycle()
-    val liveClip by vm.liveClipTransform.collectAsStateWithLifecycle()
+    val liveClipState = vm.liveClipTransform.collectAsStateWithLifecycle()        // State не читается в композиции: жест не вызывает рекомпозицию
     val aspectNow by vm.canvasAspect.collectAsStateWithLifecycle()
-    val aspectApplied by vm.displayAspect.collectAsStateWithLifecycle()
+    val rev by vm.targetRev.collectAsStateWithLifecycle()
     val selText by vm.canvasTextId.collectAsStateWithLifecycle()
     val clipAspects by vm.clipAspects.collectAsStateWithLifecycle()
     val cropClip by vm.cropClipId.collectAsStateWithLifecycle()
     val clips by vm.clips.collectAsStateWithLifecycle()
     val scrubOn by vm.scrubOverlayOn.collectAsStateWithLifecycle()
-    val playerNow by vm.controller.playerFlow.collectAsStateWithLifecycle()
     val scrubFrame by vm.scrubFrame.collectAsStateWithLifecycle()
     val bgSel by vm.canvasBg.collectAsStateWithLifecycle()
     val cover by vm.overlayCover.collectAsStateWithLifecycle()
     val pipOn by vm.pipetteOn.collectAsStateWithLifecycle()
     val pipPos by vm.pipettePos.collectAsStateWithLifecycle()
-    val pending = abs(aspectApplied - aspectNow) > 0.002f
+    var gl by remember { mutableStateOf<PreviewGlView?>(null) }
+    gl?.let { view ->
+        // всё, что связано с жестом и кадром, идёт мимо композиции — напрямую в GL-вид
+        LaunchedEffect(view) { vm.displayAspect.collect { view.setFrameAspect(it) } }
+        LaunchedEffect(view) {
+            vm.liveClipTransform.collect { l ->
+                val isMain = l != null && vm.clips.value.firstOrNull { it.id == l.id }?.row == 0       // наложения «запечены» не в весь кадр
+                view.setLive(if (isMain) l?.baked else null, if (isMain) l?.current else null)
+            }
+        }
+        LaunchedEffect(view) { vm.glClearNext.collect { view.clearLiveOnNextFrame() } }
+    }
 
     Box(modifier.fillMaxWidth().background(Color.Black).clipToBounds(), contentAlignment = Alignment.Center) {
         // рамка выбранного формата: всё, что выходит за её границы, аппаратно отсекается
         Box(Modifier.aspectRatio(aspectNow.coerceIn(0.2f, 5f)).clipToBounds()) {
+            // GL-вид создаётся ОДИН раз и больше не трогается из Compose: плеер рисует в его SurfaceTexture, жесты — матрицей в шейдере
             AndroidView(
                 factory = { c ->
-                    // CompositionPlayer умеет выводить только в SurfaceView (TextureView он не поддерживает и падает)
-                    PlayerView(c).apply {
-                        useController = false
-                        resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-                        setShutterBackgroundColor(android.graphics.Color.BLACK)
-                        player = playerNow
+                    PreviewGlView(c).also { v ->
+                        v.onSurface = { surf -> vm.controller.setOutputSurface(surf) }
+                        gl = v
                     }
                 },
-                update = {
-                    it.resizeMode = if (pending) AspectRatioFrameLayout.RESIZE_MODE_ZOOM else AspectRatioFrameLayout.RESIZE_MODE_FIT
-                    if (it.player !== playerNow) it.player = playerNow                      // плеер пересоздаётся при появлении наложений
-                },
+                update = { },
                 modifier = Modifier.fillMaxSize(),
             )
             // кадр под курсором напрямую из файла, пока плеер на паузе догоняет позицию при перемотке
@@ -446,8 +451,7 @@ private fun PreviewStage(
                 if (sf != null) Image(
                     sf.image, null, contentScale = androidx.compose.ui.layout.ContentScale.Fit,
                     modifier = Modifier.fillMaxSize().graphicsLayer {
-                        // во время жеста — текущее положение пальцев (SurfaceView не умеет масштаб/поворот, а картинка Compose — умеет)
-                        val t = liveClip?.current ?: sf.transform
+                        val t = sf.transform
                         translationX = t.x * size.width; translationY = t.y * size.height
                         scaleX = t.scale; scaleY = t.scale; rotationZ = t.rotationDeg
                     },
@@ -458,8 +462,8 @@ private fun PreviewStage(
             visibleTexts.filter { it.pagTemplate != null }.forEach { PagTitleOverlay(it, playhead, aspectNow) }
             CaptionOverlay(CaptionOps.captionAt(captionItems, playhead), captionStyle, playhead, aspectNow)
             // свободные жесты: перемещение / масштаб / поворот выделенного клипа или текста
-            val target = remember(selected, selText, texts, liveClip, playhead, clips, clipAspects, cropClip) { vm.canvasTarget() }
-            CanvasTransformOverlay(aspectNow, target, visibleTexts, vm)
+            val target = remember(selected, selText, texts, playhead, clips, clipAspects, cropClip, rev) { vm.canvasTarget() }
+            CanvasTransformOverlay(aspectNow, target, visibleTexts, vm, liveClipState)
             if (pipOn) PipetteOverlay(pipPos) { pos, w, h -> vm.movePipette(pos, w, h) }
         }
         // полноэкранный режим: иконка внизу справа; в полноэкранном — ещё Play/Pause и время

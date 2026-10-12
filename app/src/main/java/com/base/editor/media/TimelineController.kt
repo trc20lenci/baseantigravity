@@ -78,6 +78,20 @@ class TimelineController(
         return b.build().also { it.addListener(this); it.volume = if (muted) 0f else 1f }
     }
 
+    private var outSurface: android.view.Surface? = null
+
+    /** Поверхность, в которую плеер рисует композицию (принадлежит GL-виду превью). null — вида нет, выводить некуда. */
+    fun setOutputSurface(surface: android.view.Surface?) { outSurface = surface; applyOutput() }
+
+    /** Размер вывода = размер холста композиции. Вызывается при смене поверхности, холста и плеера. */
+    private fun applyOutput() {
+        val surf = outSurface
+        runCatching {
+            if (surf == null) player.clearVideoSurface()
+            else player.setVideoSurface(surf, androidx.media3.common.util.Size(canvas.width, canvas.height))
+        }.onFailure { Log.w(TAG, "поверхность вывода", it) }
+    }
+
     private fun ensurePlayer(multi: Boolean) {
         if (multi == playerMulti) return
         val old = player
@@ -87,6 +101,7 @@ class TimelineController(
         playerReady = false
         player = createPlayer(multi)
         _playerFlow.value = player
+        applyOutput()
     }
 
     private val _state = MutableStateFlow(TimelineState(emptyList(), emptyList()))
@@ -193,6 +208,7 @@ class TimelineController(
     fun setCanvas(size: Size) {
         if (size == canvas) return
         canvas = size
+        applyOutput()
         requestRebuild()
     }
 

@@ -71,6 +71,7 @@ fun CanvasTransformOverlay(
     target: CanvasTarget?,
     texts: List<TextClip>,
     actions: CanvasActions,
+    live: androidx.compose.runtime.State<LiveClip?>,
     modifier: Modifier = Modifier,
 ) {
     val measurer = rememberTextMeasurer(cacheSize = 32)
@@ -178,7 +179,8 @@ fun CanvasTransformOverlay(
                 is CanvasTarget.Clip -> {
                     // рамка строго по вписанному кадру клипа (ContentScale.Fit), а не по всему холсту;
                     // масштаб и поворот идут вокруг центра кадра, как в MultiTouchListener (PhotoEditor)
-                    val c = t.transform
+                    // положение под пальцами читается ЗДЕСЬ, в отрисовке: жест перерисовывает только рамку, без рекомпозиции экрана
+                    val c = live.value?.takeIf { it.id == t.id }?.current ?: t.transform
                     val (fw, fh) = fitSize(size.width, size.height, t.aspect)
                     drawSelection(Offset(size.width / 2 + c.x * size.width, size.height / 2 + c.y * size.height), fw * c.scale, fh * c.scale, c.rotationDeg)
                 }

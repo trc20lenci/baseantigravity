@@ -184,6 +184,10 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
     private val scrubFrames = com.base.editor.media.ScrubFrames(app, viewModelScope)
     val scrubFrame = scrubFrames.frame
     val scrubOverlayOn = MutableStateFlow(false)
+    /** Жест закончен: GL-превью снимает живое смещение в тот кадр, когда придёт кадр плеера с новым положением. */
+    val glClearNext = MutableStateFlow(0)
+    /** Растёт при каждой фиксации правки (жест закончен, отмена, ключ): по нему превью обновляет цель жеста. */
+    val targetRev = MutableStateFlow(0)
     /** true — подмена закрывает плеер сразу (смена формата/фона), не дожидаясь кадра: иначе видно, как картинка «сплющивается». */
     val overlayCover = MutableStateFlow(false)
     private fun hideOverlay() { scrubHideJob?.cancel(); snapshotJob?.cancel(); scrubOverlayOn.value = false; overlayCover.value = false; scrubFrames.clear() }
@@ -473,6 +477,7 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
     }
     init {
         runPendingTool()
+        viewModelScope.launch { controller.committed.collect { targetRev.value++ } }
         viewModelScope.launch { controller.isPlaying.collect { if (it) hideOverlay() } }
         captions.prefetch(com.base.editor.captions.asr.SpeechLanguage.RU)
         com.base.editor.media.gl.FxDiagnostics.listener = { msg -> events.value = msg }
@@ -619,12 +624,6 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
         val clip = clips.value.firstOrNull { it.id == clipId } ?: return
         val hasKeys = keyframes.value[clipId].orEmpty().isNotEmpty()
         val baked = liveClipTransform.value?.takeIf { it.id == clipId }?.baked ?: effectiveTransform(clip)
-        if (liveClipTransform.value == null && clip.row == 0) {
-            // начало жеста: показываем кадр клипа картинкой поверх плеера — она следует за пальцами в реальном времени
-            val local = (playheadMs.value - clip.startMs).coerceAtLeast(0L)
-            scrubHideJob?.cancel(); scrubOverlayOn.value = true
-            scrubFrames.request(clip, local, true, baked, controller.cropOf(clipId), controller.state.value.chromas[clipId], controller.state.value.bgs[clipId])
-        }
         liveClipTransform.value = LiveClip(clipId, baked, transform)
         if (clip.row != 0) controller.refreshLive()
         if (hasKeys) {
@@ -642,12 +641,12 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
         val live = liveClipTransform.value
         if (live != null) {
             val applied = controller.appliedVersion.value
+            glClearNext.value++                          // GL снимет смещение жеста в момент прихода нового кадра (без скачка)
             controller.commitTransformEdit()
             viewModelScope.launch {
-                // кадр-подмена держится, пока плеер реально не покажет новое положение (а не фиксированное время)
-                val deadline = System.currentTimeMillis() + 5000
+                val deadline = System.currentTimeMillis() + 3500
                 while (controller.appliedVersion.value == applied && System.currentTimeMillis() < deadline) delay(40)
-                liveClipTransform.value = null
+                liveClipTransform.value = null           // страховка: если новый кадр так и не пришёл
                 hideOverlay()
             }
         } else controller.pause()
