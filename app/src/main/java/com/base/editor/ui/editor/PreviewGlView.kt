@@ -74,6 +74,7 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
         private val frameReady = AtomicBoolean(false)
         private val texMat = FloatArray(16)
         private var w = 1; private var h = 1
+        private var frames = 0L
         private val verts = FloatBuffer.allocate(8)
         private val uvs: FloatBuffer = ByteBuffer.allocateDirect(8 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(floatArrayOf(0f, 0f, 1f, 0f, 0f, 1f, 1f, 1f)); position(0) }
         private val posDirect: FloatBuffer = ByteBuffer.allocateDirect(8 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
@@ -95,6 +96,7 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
             s.setOnFrameAvailableListener { frameReady.set(true); requestRender() }
             st = s; surface = Surface(s)
             val out = surface
+            android.util.Log.d("BaseGl", "поверхность создана, буфер ${bufW}x${bufH}")
             main.post { onSurface?.invoke(out) }
         }
 
@@ -103,7 +105,7 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
         override fun onDrawFrame(gl: GL10?) {
             val s = st
             val newFrame = frameReady.getAndSet(false)
-            if (s != null && newFrame) { runCatching { s.updateTexImage() } }
+            if (s != null && newFrame) { runCatching { s.updateTexImage() }; frames++; if (frames % 120L == 0L) android.util.Log.d("BaseGl", "кадров получено: $frames, аспект=$frameAspect, живое=${current != null}") }
             // новый кадр плеера уже содержит новое положение — смещение жеста снимаем в этот же кадр отрисовки
             if (newFrame && clearOnNextFrame) { clearOnNextFrame = false; baked = null; current = null }
             GLES20.glClearColor(0f, 0f, 0f, 1f); GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
@@ -160,6 +162,7 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
     }
 
     override fun onDetachedFromWindow() {
+        android.util.Log.d("BaseGl", "вид отсоединён от окна")
         // поверхность плеера принадлежит GL-контексту этого вида: пока вида нет — плееру выводить некуда
         main.post { onSurface?.invoke(null) }
         super.onDetachedFromWindow()

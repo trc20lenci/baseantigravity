@@ -417,7 +417,7 @@ private fun PreviewStage(
     var gl by remember { mutableStateOf<PreviewGlView?>(null) }
     gl?.let { view ->
         // всё, что связано с жестом и кадром, идёт мимо композиции — напрямую в GL-вид
-        LaunchedEffect(view) { vm.displayAspect.collect { view.setFrameAspect(it) } }
+        LaunchedEffect(view) { vm.controller.videoAspect.collect { view.setFrameAspect(it) } }
         LaunchedEffect(view) { vm.canvasPx.collect { (w, h) -> view.setBufferSize(w, h) } }
         LaunchedEffect(view) {
             vm.liveClipTransform.collect { l ->

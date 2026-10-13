@@ -111,27 +111,37 @@ fun CanvasTransformOverlay(
                         if (transforming && b != null && event.changes.any { it.pressed }) {
                             val w = size.width.toFloat(); val h = size.height.toFloat()
                             dragging = true
-                            // Движение свободное: положение и поворот НИЧЕГО не «магнитят» на ходу. Линии лишь подсвечиваются и
-                            // слегка вибрируют, когда элемент оказался в нескольких dp от центра; ровно он встаёт при отпускании.
-                            val tx = NEAR_DP.dp.toPx() / w; val ty = NEAR_DP.dp.toPx() / h
-                            fun nearRight(raw: Float): Boolean { val k = Math.round(raw / 90f) * 90f; return abs(raw - k) < 1.5f }
+                            // Магнит к центру с «гистерезисом»: рядом с центром элемент прилипает и держится ровно, пока палец не отведён
+                            // заметно дальше; вдали от центра движение полностью свободное. Линии мигают, пока он «на месте».
+                            val catchX = CATCH_DP.dp.toPx() / w; val catchY = CATCH_DP.dp.toPx() / h
+                            val freeX = RELEASE_DP.dp.toPx() / w; val freeY = RELEASE_DP.dp.toPx() / h
+                            fun angleOff(raw: Float): Float { val k = Math.round(raw / 90f) * 90f; return abs(raw - k) }
+                            fun angleSnap(raw: Float) = Math.round(raw / 90f) * 90f
                             when (b) {
                                 is CanvasTarget.Clip -> {
-                                    val nx = b.transform.x + accPan.x / w; val ny = b.transform.y + accPan.y / h
+                                    var nx = b.transform.x + accPan.x / w; var ny = b.transform.y + accPan.y / h
                                     val rawRot = b.transform.rotationDeg + accRot
-                                    val sx = abs(nx) < tx; val sy = abs(ny) < ty; val rs = nearRight(rawRot)
-                                    if ((sx && !snapX) || (sy && !snapY) || (rs && !rotSnapped)) view.haptic(Haptic.SNAP)
-                                    snapX = sx; snapY = sy; rotSnapped = rs
-                                    lastClip = b.transform.copy(x = nx, y = ny, scale = b.transform.scale * accZoom, rotationDeg = rawRot).sane()
+                                    val hx = if (snapX) abs(nx) < freeX else abs(nx) < catchX
+                                    val hy = if (snapY) abs(ny) < freeY else abs(ny) < catchY
+                                    val hr = if (rotSnapped) angleOff(rawRot) < ROT_RELEASE else angleOff(rawRot) < ROT_CATCH
+                                    if ((hx && !snapX) || (hy && !snapY) || (hr && !rotSnapped)) view.haptic(Haptic.SNAP)
+                                    snapX = hx; snapY = hy; rotSnapped = hr
+                                    if (hx) nx = 0f; if (hy) ny = 0f
+                                    val rot = if (hr) angleSnap(rawRot) else rawRot
+                                    lastClip = b.transform.copy(x = nx, y = ny, scale = b.transform.scale * accZoom, rotationDeg = rot).sane()
                                     act.onClipTransform(b.id, lastClip!!)
                                 }
                                 is CanvasTarget.Text -> {
-                                    val px = (b.clip.positionX + accPan.x / w).coerceIn(-0.2f, 1.2f); val py = (b.clip.positionY + accPan.y / h).coerceIn(-0.2f, 1.2f)
+                                    var px = (b.clip.positionX + accPan.x / w).coerceIn(-0.2f, 1.2f); var py = (b.clip.positionY + accPan.y / h).coerceIn(-0.2f, 1.2f)
                                     val rawRot = b.clip.rotationDeg + accRot
-                                    val sx = abs(px - 0.5f) < tx; val sy = abs(py - 0.5f) < ty; val rs = nearRight(rawRot)
-                                    if ((sx && !snapX) || (sy && !snapY) || (rs && !rotSnapped)) view.haptic(Haptic.SNAP)
-                                    snapX = sx; snapY = sy; rotSnapped = rs
-                                    lastText = b.clip.copy(positionX = px, positionY = py, fontSizeSp = (b.clip.fontSizeSp * accZoom).coerceIn(8f, 160f), rotationDeg = rawRot)
+                                    val hx = if (snapX) abs(px - 0.5f) < freeX else abs(px - 0.5f) < catchX
+                                    val hy = if (snapY) abs(py - 0.5f) < freeY else abs(py - 0.5f) < catchY
+                                    val hr = if (rotSnapped) angleOff(rawRot) < ROT_RELEASE else angleOff(rawRot) < ROT_CATCH
+                                    if ((hx && !snapX) || (hy && !snapY) || (hr && !rotSnapped)) view.haptic(Haptic.SNAP)
+                                    snapX = hx; snapY = hy; rotSnapped = hr
+                                    if (hx) px = 0.5f; if (hy) py = 0.5f
+                                    val rot = if (hr) angleSnap(rawRot) else rawRot
+                                    lastText = b.clip.copy(positionX = px, positionY = py, fontSizeSp = (b.clip.fontSizeSp * accZoom).coerceIn(8f, 160f), rotationDeg = rot)
                                     act.onTextTransform(lastText!!, b.isDraft)
                                 }
                             }
@@ -190,7 +200,10 @@ fun CanvasTransformOverlay(
 }
 
 /** Подсветка линий центра при приближении (dp) и точная постановка по центру при отпускании (dp). */
-private const val NEAR_DP = 5
+private const val CATCH_DP = 9          // на каком расстоянии от центра элемент прилипает
+private const val RELEASE_DP = 18       // на каком — отлипает (больше, чем «прилипает»: магнит «держит»)
+private const val ROT_CATCH = 3f        // градусы
+private const val ROT_RELEASE = 7f
 private const val SETTLE_DP = 7
 
 /** Размер кадра с соотношением [aspect], вписанного в холст w×h без растяжения (ContentScale.Fit). */

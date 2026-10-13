@@ -69,6 +69,9 @@ class TimelineController(
      */
     var player: CompositionPlayer = createPlayer(false)
         private set
+    private val _videoAspect = MutableStateFlow(9f / 16f)
+    /** Реальные пропорции кадров, которые сейчас выдаёт плеер (по событию onVideoSizeChanged): по ним GL вписывает картинку. */
+    val videoAspect: StateFlow<Float> = _videoAspect.asStateFlow()
     private val _playerFlow = MutableStateFlow(player)
     val playerFlow: StateFlow<CompositionPlayer> = _playerFlow.asStateFlow()
 
@@ -86,6 +89,7 @@ class TimelineController(
     /** Размер вывода = размер холста композиции. Вызывается при смене поверхности, холста и плеера. */
     private fun applyOutput() {
         val surf = outSurface
+        Log.d("BasePlayer", "вывод: surface=${surf != null} размер=${canvas.width}x${canvas.height}")
         runCatching {
             if (surf == null) player.clearVideoSurface()
             else player.setVideoSurface(surf, androidx.media3.common.util.Size(canvas.width, canvas.height))
@@ -275,7 +279,10 @@ class TimelineController(
     private fun rerenderCurrentFrame() {
         val pos = player.currentPosition
         rerenderSign = -rerenderSign
-        seekPlayerSafely(if (pos < 2) pos + 1 else pos + rerenderSign)
+        val step = RERENDER_STEP_MS
+        val total = _state.value.totalMs
+        seekPlayerSafely((if (pos < step || pos + step > total) pos - step * rerenderSign else pos + step * rerenderSign).coerceIn(0L, maxOf(0L, total - 1)))
+        Log.d("BasePlayer", "перерисовка кадра: pos=$pos")
     }
 
     private var lastLiveRefresh = 0L
@@ -408,6 +415,7 @@ class TimelineController(
         if (_state.value.clips.none { it.row == 0 }) return
         stopAtMs = -1
         scrubEnd()                                                // доставить последнюю позицию перемотки
+        if (playerReady && kotlin.math.abs(player.currentPosition - _playhead.value) > 5) seekPlayerSafely(_playhead.value)     // после «перерисовки кадра» позиция плеера могла сместиться
         if (_playhead.value >= _state.value.totalMs - 50) seekTo(0)
         if (!playerReady) { playWhenReady = true; return }        // композиция ещё готовится: стартуем, как только будет READY
         if (seekInFlight) {
@@ -534,6 +542,7 @@ class TimelineController(
             playerReady = false                                  // пока новая композиция готовится — seek откладывается
             if (composition == null) { player.stop(); return }
             ensurePlayer(composition.sequences.count { C.TRACK_TYPE_VIDEO in it.trackTypes } > 1)
+            Log.d("BasePlayer", "setComposition: последовательностей=${composition.sequences.size}, холст=${canvas.width}x${canvas.height}, multi=$playerMulti")
             pendingSeekMs = _playhead.value
             player.setComposition(composition, _playhead.value)
             player.prepare()
@@ -550,7 +559,13 @@ class TimelineController(
         if (reason == Player.DISCONTINUITY_REASON_SEEK || reason == Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT) seekInFlight = false
     }
 
+    override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
+        Log.d("BasePlayer", "размер видео ${videoSize.width}x${videoSize.height} ratio=${videoSize.pixelWidthHeightRatio}")
+        if (videoSize.width > 0 && videoSize.height > 0) _videoAspect.value = videoSize.width * videoSize.pixelWidthHeightRatio / videoSize.height
+    }
+
     override fun onPlaybackStateChanged(playbackState: Int) {
+        Log.d("BasePlayer", "состояние=$playbackState pos=${player.currentPosition}")
         _buffering.value = playbackState == Player.STATE_BUFFERING
         if (playbackState == Player.STATE_READY) seekInFlight = false
         // сторожок: если буферизация затянулась (декодер завис), перемещаем плеер в ту же позицию и переподключаем поверхность
@@ -591,6 +606,7 @@ class TimelineController(
             _events.tryEmit("Проблема с декодером или GPU — переходы временно отключены")
             requestRebuild()
         } else {
+            Log.e("BasePlayer", "ошибка плеера", error)
             val root = generateSequence<Throwable>(error) { it.cause }.last()
             _events.tryEmit("Не удалось воспроизвести: ${error.errorCodeName} (${root.javaClass.simpleName}: ${root.message?.take(80)})")
         }
@@ -602,6 +618,7 @@ class TimelineController(
         const val PREVIEW_PAD_MS = 400L
         const val FRAME_REFRESH_MS = 120L
         const val SEEK_RENDER_MARGIN_MS = 250L
+        const val RERENDER_STEP_MS = 40L
         const val SCRUB_MS = 33L
         const val SEEK_INFLIGHT_MAX_MS = 250L
         const val SURFACE_REBIND_MS = 70L

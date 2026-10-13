@@ -177,6 +177,8 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
         snapshotJob?.cancel()
         snapshotJob = viewModelScope.launch {
             kotlinx.coroutines.withTimeoutOrNull(9000) { controller.appliedVersion.first { it > v0 } }
+            // пока плеер не начал выдавать кадры НОВОГО формата (событие размера видео), картинка-подмена остаётся на экране
+            kotlinx.coroutines.withTimeoutOrNull(5000) { controller.videoAspect.first { kotlin.math.abs(it - canvasAspect.value) < 0.03f } }
             controller.awaitSeekSettled(2500)
             hideOverlay()
         }
@@ -622,7 +624,12 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
 
     override fun onGestureStart() { controller.beginEdit() }
 
+    private var gestureEvents = 0; private var gestureStart = 0L; private var gestureLast = 0L; private var gestureMaxGap = 0L; private var gestureHandlerNs = 0L
+
     override fun onClipTransform(clipId: Long, transform: ClipTransform) {
+        val t0 = System.nanoTime(); val nowMs = android.os.SystemClock.uptimeMillis()
+        if (liveClipTransform.value == null) { gestureEvents = 0; gestureStart = nowMs; gestureLast = nowMs; gestureMaxGap = 0; gestureHandlerNs = 0 }
+        gestureEvents++; gestureMaxGap = maxOf(gestureMaxGap, nowMs - gestureLast); gestureLast = nowMs
         val clip = clips.value.firstOrNull { it.id == clipId } ?: return
         val hasKeys = keyframes.value[clipId].orEmpty().isNotEmpty()
         val baked = liveClipTransform.value?.takeIf { it.id == clipId }?.baked ?: effectiveTransform(clip)
@@ -634,6 +641,7 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
         } else {
             controller.setClipTransform(clipId, transform)
         }
+        gestureHandlerNs += System.nanoTime() - t0
     }
 
     override fun onTextTransform(clip: TextClip, isDraft: Boolean) { controller.updateText(clip) }
@@ -642,6 +650,7 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
     override fun onGestureEnd() {
         val live = liveClipTransform.value
         if (live != null) {
+            android.util.Log.d("BaseGesture", "жест: событий=$gestureEvents за ${gestureLast - gestureStart} мс, макс. пауза=$gestureMaxGap мс, в обработчике в среднем ${if (gestureEvents > 0) gestureHandlerNs / gestureEvents / 1000 else 0} мкс")
             val applied = controller.appliedVersion.value
             glClearNext.value++                          // GL снимет смещение жеста в момент прихода нового кадра (без скачка)
             controller.commitTransformEdit()
