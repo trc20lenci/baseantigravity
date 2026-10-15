@@ -83,8 +83,13 @@ class TimelineController(
 
     private var outSurface: android.view.Surface? = null
 
-    /** Поверхность, в которую плеер рисует композицию (принадлежит GL-виду превью). null — вида нет, выводить некуда. */
-    fun setOutputSurface(surface: android.view.Surface?) { outSurface = surface; applyOutput() }
+    fun setOutputSurface(surface: android.view.Surface?) {
+        outSurface = surface
+        applyOutput()
+        if (surface != null && playerReady && !player.isPlaying) {
+            rerenderCurrentFrame()
+        }
+    }
 
     /** Размер вывода = размер холста композиции. Вызывается при смене поверхности, холста и плеера. */
     private fun applyOutput() {
