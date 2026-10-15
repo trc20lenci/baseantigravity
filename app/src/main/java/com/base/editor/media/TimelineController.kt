@@ -159,7 +159,8 @@ class TimelineController(
                     val request = CompositionRequest(snapshot, canvas, safeMode = safeMode, onTransitionFallback = { _events.tryEmit(it) },
                         liveTransforms = { id, localMs -> _state.value.transformAt(id, localMs) },
                         liveFx = { id -> com.base.editor.media.gl.FxParams(_state.value.chromas[id], _state.value.bgs[id]) },
-                        canvasBg = canvasBg)
+                        canvasBg = canvasBg,
+                        blurRadius = { blurRadius })
                     val composition = runCatching { factory.build(request) }
                         .onFailure { Log.e(TAG, "не удалось собрать композицию", it); _events.tryEmit("Не удалось подготовить предпросмотр") }
                         .getOrNull()
@@ -213,6 +214,15 @@ class TimelineController(
     var canvasBg: com.base.editor.core.CanvasBg = com.base.editor.core.CanvasBg.BLACK
         private set
     fun setCanvasBg(bg: com.base.editor.core.CanvasBg) { if (bg == canvasBg) return; canvasBg = bg; requestRebuild() }
+
+    var blurRadius: Float = 1.0f
+        private set
+    fun setBlurRadius(radius: Float) {
+        val r = radius.coerceIn(0.2f, 3.0f)
+        if (kotlin.math.abs(r - blurRadius) < 0.01f) return
+        blurRadius = r
+        refreshFrameLive()
+    }
 
     fun setCanvas(size: Size) {
         if (size == canvas) return
@@ -325,6 +335,9 @@ class TimelineController(
         publish()
         _committed.tryEmit(Unit)
         _applied.value++
+        if (playerReady && !player.isPlaying) {
+            rerenderCurrentFrame()
+        }
     }
 
     /**

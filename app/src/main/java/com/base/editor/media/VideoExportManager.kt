@@ -43,6 +43,7 @@ data class ExportRequest(
     val captions: CaptionTrack? = null,
     val texts: List<com.base.editor.text.TextClip> = emptyList(),
     val canvasBg: com.base.editor.core.CanvasBg = com.base.editor.core.CanvasBg.BLACK,
+    val blurRadius: Float = 1.0f,
 )
 
 sealed interface ExportState {
@@ -82,7 +83,7 @@ class VideoExportManager(
             val canvas = CompositionFactory.canvasFor(req.aspect, (req.quality.shortSide * scale).toInt())
             val output = outputFile()
             val composition: Composition? = runCatching {
-                factory.build(CompositionRequest(req.state, canvas, req.removeAudio, safeMode = simple, captions = req.captions, texts = req.texts, fps = req.fps, canvasBg = req.canvasBg))
+                factory.build(CompositionRequest(req.state, canvas, req.removeAudio, safeMode = simple, captions = req.captions, texts = req.texts, fps = req.fps, canvasBg = req.canvasBg, blurRadius = { req.blurRadius }))
             }.getOrNull()
             if (composition == null) { trySend(ExportState.Failed("Нет клипов для экспорта")); close(); return }
 

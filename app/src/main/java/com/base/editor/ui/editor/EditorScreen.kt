@@ -160,6 +160,7 @@ fun EditorScreen(onClose: () -> Unit, onAddMedia: () -> Unit, vm: EditorViewMode
     val bgBar by vm.bgBarOpen.collectAsStateWithLifecycle()
     val ttsOpen by vm.ttsSheetOpen.collectAsStateWithLifecycle()
     val canvasBgSel by vm.canvasBg.collectAsStateWithLifecycle()
+    val blurRadius by vm.blurRadius.collectAsStateWithLifecycle()
     val pagTemplates by vm.pagTemplates.collectAsStateWithLifecycle()
 
     SideEffect { vm.onRequestAddMedia = onAddMedia }
@@ -269,7 +270,7 @@ fun EditorScreen(onClose: () -> Unit, onAddMedia: () -> Unit, vm: EditorViewMode
                                 ToolButton(Lucide.Sparkles, "Анимации") { soon(ctx) }
                                 ToolButton(Lucide.Trash2, "Удалить", onClick = vm::deleteSelected)
                             }
-                            ToolMode.BACKGROUND -> BackgroundsBar(canvasBgSel, onPick = vm::setCanvasBg, onBack = vm::closeBgBar)
+                            ToolMode.BACKGROUND -> BackgroundsBar(canvasBgSel, blurRadius, onPick = vm::setCanvasBg, onBlurRadiusChange = vm::setBlurRadius, onBack = vm::closeBgBar)
                             ToolMode.AUDIO -> ToolRow {
                                 ToolButton(Lucide.ChevronLeft, "Назад") { vm.select(null) }
                                 ToolButton(Lucide.SquareSplitHorizontal, "Разделить", onClick = vm::split)
@@ -423,7 +424,12 @@ private fun PreviewStage(
         LaunchedEffect(view) { vm.canvasPx.collect { (w, h) -> view.setBufferSize(w, h) } }
         LaunchedEffect(view) {
             vm.liveClipTransform.collect { l ->
-                view.setLive(l?.baked, l?.current)
+                val targetClip = l?.let { live -> clips.firstOrNull { it.id == live.id } }
+                if (targetClip != null && targetClip.row == 0 && bgSel == com.base.editor.core.CanvasBg.BLACK && clips.none { it.row == com.base.editor.media.CompositionFactory.OVERLAY_ROW }) {
+                    view.setLive(l.baked, l.current)
+                } else {
+                    view.setLive(null, null)
+                }
             }
         }
         LaunchedEffect(view) { vm.glClearNext.collect { view.clearLiveOnNextFrame() } }

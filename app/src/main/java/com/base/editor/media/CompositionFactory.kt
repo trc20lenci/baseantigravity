@@ -51,6 +51,8 @@ data class CompositionRequest(
     val liveFx: ((Long) -> com.base.editor.media.gl.FxParams)? = null,
     /** Фон полей вокруг кадра. */
     val canvasBg: com.base.editor.core.CanvasBg = com.base.editor.core.CanvasBg.BLACK,
+    /** Радиус размытия фона полей (живой источник). */
+    val blurRadius: () -> Float = { 1.0f },
 )
 
 /**
@@ -108,7 +110,7 @@ class CompositionFactory(private val context: Context, private val catalog: Tran
                     keys.isNotEmpty() -> { us -> com.base.editor.domain.KeyframeTrack.at(keys, (us / 1000 - startMs).coerceAtLeast(0L)) }
                     else -> { _ -> staticT }
                 }
-                effects += com.base.editor.media.gl.BackgroundFitEffect(req.canvas.width, req.canvas.height, req.canvasBg.argb) { us -> transformMatrix(transformAt(us), req.canvas) }
+                effects += com.base.editor.media.gl.BackgroundFitEffect(req.canvas.width, req.canvas.height, req.canvasBg.argb, req.blurRadius) { us -> transformMatrix(transformAt(us), req.canvas) }
             } else {
                 effects += (Presentation.createForWidthAndHeight(req.canvas.width, req.canvas.height, Presentation.LAYOUT_SCALE_TO_FIT))
                 if (live != null) {
@@ -134,11 +136,13 @@ class CompositionFactory(private val context: Context, private val catalog: Tran
         // наложения (фото/видео поверх основного): отдельная видео-последовательность на всю длину проекта.
         // Компоновщик Media3 рисует ПЕРВУЮ зарегистрированную последовательность поверх остальных, поэтому она идёт первой;
         // «пустые» места заполняются прозрачной картинкой, чтобы основной поток не оставался без кадров.
+        // ВАЖНО: последовательность строго C.TRACK_TYPE_VIDEO (без аудио), иначе transparentFiller (PNG без звука)
+        // вешает звуковой граф Media3 в бесконечный BUFFERING, блокируя воспроизведение.
         val overlayClips = req.state.clips.filter { it.row == OVERLAY_ROW && it.type != MediaType.AUDIO }.sortedBy { it.startMs }
         val fpsUsed = req.fps ?: FRAME_RATE
         val overlaySeq = if (overlayClips.isEmpty()) null else {
             val totalMs = maxOf(main.last().endMs, overlayClips.last().endMs)
-            val o = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_AUDIO, C.TRACK_TYPE_VIDEO))
+            val o = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_VIDEO))
             var cur = 0L
             for (c in overlayClips) {
                 if (c.startMs > cur) o.addItem(transparentFiller(c.startMs - cur, fpsUsed))
@@ -151,7 +155,7 @@ class CompositionFactory(private val context: Context, private val catalog: Tran
                 }
                 req.state.crops[c.id]?.takeIf { !it.isFull }?.let { cr -> fx += Crop(-1f + 2f * cr.left, -1f + 2f * cr.right, 1f - 2f * cr.bottom, 1f - 2f * cr.top) }
                 fx += com.base.editor.media.gl.FitAlphaEffect(req.canvas.width, req.canvas.height)
-                o.addItem(editedItem(c, fx, req.removeAudio, fpsUsed))
+                o.addItem(editedItem(c, fx, removeAudio = true, fps = fpsUsed))
                 cur = c.endMs
             }
             if (totalMs > cur) o.addItem(transparentFiller(totalMs - cur, fpsUsed))

@@ -32,15 +32,18 @@ object FxDiagnostics {
 class BackgroundFitEffect(
     private val canvasW: Int, private val canvasH: Int,
     private val bgArgb: Int?,                         // null — размытое видео
+    private val blurRadius: () -> Float = { 1.0f },
     private val transform: (Long) -> Matrix,
 ) : GlEffect {
     override fun toGlShaderProgram(context: Context, useHdr: Boolean): GlShaderProgram =
-        try { BgFitProgram(canvasW, canvasH, bgArgb, transform, useHdr) } catch (e: GlUtil.GlException) { throw VideoFrameProcessingException(e) }
+        try { BgFitProgram(canvasW, canvasH, bgArgb, blurRadius, transform, useHdr) } catch (e: GlUtil.GlException) { throw VideoFrameProcessingException(e) }
 }
 
 @UnstableApi
 private class BgFitProgram(
-    private val cw: Int, private val ch: Int, private val bgArgb: Int?, private val transform: (Long) -> Matrix, useHdr: Boolean,
+    private val cw: Int, private val ch: Int, private val bgArgb: Int?,
+    private val blurRadius: () -> Float,
+    private val transform: (Long) -> Matrix, useHdr: Boolean,
 ) : BaseGlShaderProgram(useHdr, 1) {
     private val program: GlProgram? = try {
         GlProgram(VERTEX_SHADER, BG_FRAGMENT).apply {
@@ -69,6 +72,7 @@ private class BgFitProgram(
             p.setFloatsUniform("uFit", floatArrayOf(fx, fy))
             p.setFloatsUniform("uCover", floatArrayOf(cover0, cover1))
             p.setIntUniform("uBlurBg", if (bgArgb == null) 1 else 0)
+            p.setFloatUniform("uBlurRadius", blurRadius().coerceIn(0.1f, 4.0f))
             val c = bgArgb ?: 0xFF000000.toInt()
             p.setFloatsUniform("uBgColor", floatArrayOf(((c shr 16) and 0xFF) / 255f, ((c shr 8) and 0xFF) / 255f, (c and 0xFF) / 255f))
             p.setFloatUniform("uEdge", 0.5f * minOf(cw, ch))      // ширина сглаживания края кадра ≈ 1 пиксель
@@ -91,6 +95,7 @@ uniform vec3 uInv1;
 uniform vec2 uFit;
 uniform vec2 uCover;
 uniform int uBlurBg;
+uniform float uBlurRadius;
 uniform vec3 uBgColor;
 uniform float uEdge;
 in vec2 vUv;
@@ -104,9 +109,9 @@ void main() {
 
   vec3 bg = uBgColor;
   if (uBlurBg == 1) {
-    // Высококачественный Гауссов блюр с билинейной выборкой и затемнением на 30%
+    // Высококачественный Гауссов блюр с билинейной выборкой и регулируемым радиусом
     vec2 c = (vUv - 0.5) * uCover + 0.5;
-    vec2 texOffset = vec2(0.0035, 0.0035);
+    vec2 texOffset = vec2(0.0035, 0.0035) * uBlurRadius;
     vec3 acc = texture(uTex, c).rgb * 0.22;
     vec2 off1 = texOffset * 1.5;
     vec2 off2 = texOffset * 3.5;

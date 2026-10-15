@@ -92,8 +92,13 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
     }
 
     fun setLive(baked: ClipTransform?, current: ClipTransform?) {
-        liveBaked = baked
-        liveCurrent = current
+        if (baked == null || current == null) {
+            liveBaked = null
+            liveCurrent = null
+        } else {
+            liveBaked = baked
+            liveCurrent = current
+        }
         requestRender()
     }
 
@@ -264,10 +269,6 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
             // 5. Построение MVP-матрицы с компенсацией Aspect Ratio
-            val fa = frameAspect.coerceIn(0.05f, 20f)
-            val fitX = if (fa >= ca) 1f else fa / ca
-            val fitY = if (fa >= ca) ca / fa else 1f
-
             val b = liveBaked
             val c = liveCurrent
             if (b != null && c != null) {
@@ -276,17 +277,13 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
                 buildAspectCompensatedMatrix(matBk, b, ca)
                 if (Matrix.invertM(invBk, 0, matBk, 0)) {
                     Matrix.multiplyMM(deltaMat, 0, matCur, 0, invBk, 0)
-                    Matrix.setIdentityM(fitMat, 0)
-                    Matrix.scaleM(fitMat, 0, fitX, fitY, 1f)
-                    Matrix.multiplyMM(mvpMat, 0, deltaMat, 0, fitMat, 0)
+                    System.arraycopy(deltaMat, 0, mvpMat, 0, 16)
                 } else {
                     Matrix.setIdentityM(mvpMat, 0)
-                    Matrix.scaleM(mvpMat, 0, fitX, fitY, 1f)
                 }
             } else {
-                // Нет жеста: кадр уже спозиционирован плеером Media3, применяем только вписывание в холст
+                // Нет жеста: кадр уже спозиционирован и вписан плеером Media3 в размер холста
                 Matrix.setIdentityM(mvpMat, 0)
-                Matrix.scaleM(mvpMat, 0, fitX, fitY, 1f)
             }
 
             // 6. Отрисовка видеокадра

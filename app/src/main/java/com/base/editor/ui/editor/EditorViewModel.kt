@@ -153,12 +153,18 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
 
     // ───────── фон холста ─────────
     val canvasBg = MutableStateFlow(com.base.editor.core.CanvasBg.BLACK)
+    val blurRadius = MutableStateFlow(1.0f)
     val bgBarOpen = MutableStateFlow(false)
     fun openBgBar() { controller.pause(); select(null); formatPanelOpen.value = false; captionPanelOpen.value = false; bgBarOpen.value = true }
     fun closeBgBar() { bgBarOpen.value = false }
     fun setCanvasBg(b: com.base.editor.core.CanvasBg) {
         if (b == canvasBg.value) return
         canvasBg.value = b; controller.setCanvasBg(b); persist()
+    }
+    fun setBlurRadius(r: Float) {
+        val clamped = r.coerceIn(0.2f, 3.0f)
+        blurRadius.value = clamped
+        controller.setBlurRadius(clamped)
     }
 
     private var snapshotJob: kotlinx.coroutines.Job? = null
@@ -642,6 +648,10 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
         } else {
             controller.setClipTransform(clipId, transform)
         }
+        // Если трансформируется наложение или фон не чёрный — просим Media3 обновить кадр вживую
+        if (clip.row == com.base.editor.media.CompositionFactory.OVERLAY_ROW || canvasBg.value != com.base.editor.core.CanvasBg.BLACK) {
+            controller.refreshLive()
+        }
         gestureHandlerNs += System.nanoTime() - t0
     }
 
@@ -650,10 +660,12 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
     /** Конец жеста: фиксируем в модели без сброса и без перемотки; GL-превью держит точное положение. */
     override fun onGestureEnd() {
         val live = liveClipTransform.value
+        liveClipTransform.value = null
         if (live != null) {
             android.util.Log.d("BaseGesture", "жест: событий=$gestureEvents за ${gestureLast - gestureStart} мс, макс. пауза=$gestureMaxGap мс")
             controller.commitGestureTransform()
             targetRev.value++
+            glClearNext.value++
         } else controller.pause()
     }
 
@@ -815,7 +827,7 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
         if (exportJob?.isActive == true) return
         controller.pause()
         val track = captions.items.value.takeIf { it.isNotEmpty() }?.let { CaptionTrack(it, captions.style.value) }
-        val request = ExportRequest(controller.state.value, aspect, quality, fps = exportFps.value, canvasBg = canvasBg.value, removeAudio = muted.value, captions = track, texts = controller.texts.value)
+        val request = ExportRequest(controller.state.value, aspect, quality, fps = exportFps.value, canvasBg = canvasBg.value, blurRadius = blurRadius.value, removeAudio = muted.value, captions = track, texts = controller.texts.value)
         exportJob = viewModelScope.launch {
             exporter.export(request).collect { s ->
                 exportState.value = s
