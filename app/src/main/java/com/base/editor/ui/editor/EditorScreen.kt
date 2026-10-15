@@ -419,7 +419,7 @@ private fun PreviewStage(
         // всё, что связано с жестом и кадром, идёт мимо композиции — напрямую в GL-вид
         LaunchedEffect(view) { vm.controller.videoAspect.collect { view.setFrameAspect(it) } }
         LaunchedEffect(view) { vm.canvasAspect.collect { view.setCanvasAspect(it) } }
-        LaunchedEffect(view) { vm.canvasBg.collect { view.setCanvasBg(it.argb ?: 0) } }
+        LaunchedEffect(view) { vm.canvasBg.collect { view.setCanvasBackground(it.argb, it == com.base.editor.core.CanvasBg.BLUR) } }
         LaunchedEffect(view) { vm.canvasPx.collect { (w, h) -> view.setBufferSize(w, h) } }
         LaunchedEffect(view) {
             vm.liveClipTransform.collect { l ->
@@ -448,12 +448,12 @@ private fun PreviewStage(
         Box(Modifier.aspectRatio(aspectNow.coerceIn(0.2f, 5f)).clipToBounds()) {
             // кадр под курсором напрямую из файла, пока плеер на паузе догоняет позицию при перемотке
             val sf = scrubFrame
-            if (scrubOn && (sf != null || cover)) Box(Modifier.fillMaxSize().background(bgSel.argb?.let { Color(it) } ?: Color(0xFF16181D))) {
-                if (sf != null && bgSel == com.base.editor.core.CanvasBg.BLUR) {
+            if (scrubOn && sf != null) Box(Modifier.fillMaxSize().background(bgSel.argb?.let { Color(it) } ?: Color.Transparent)) {
+                if (bgSel == com.base.editor.core.CanvasBg.BLUR) {
                     // подложка «размытое видео»: тот же кадр на весь холст, сильно размытый (на Android 12+)
                     Image(sf.image, null, contentScale = androidx.compose.ui.layout.ContentScale.Crop, modifier = Modifier.fillMaxSize().blur(28.dp))
                 }
-                if (sf != null) Image(
+                Image(
                     sf.image, null, contentScale = androidx.compose.ui.layout.ContentScale.Fit,
                     modifier = Modifier.fillMaxSize().graphicsLayer {
                         val t = sf.transform

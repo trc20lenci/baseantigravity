@@ -103,17 +103,25 @@ void main() {
   float inside = clamp(min(1.0 - abs(f.x), 1.0 - abs(f.y)) * uEdge, 0.0, 1.0);
 
   vec3 bg = uBgColor;
-  if (uBlurBg == 1) {                                          // размытая копия видео, растянутая на весь холст
+  if (uBlurBg == 1) {
+    // Высококачественный Гауссов блюр с билинейной выборкой и затемнением на 30%
     vec2 c = (vUv - 0.5) * uCover + 0.5;
-    vec3 acc = texture(uTex, c).rgb; float w = 1.0;
-    for (int ring = 1; ring <= 3; ring++) {
-      float r = 0.025 * float(ring);
-      for (int i = 0; i < 8; i++) {
-        float a = 6.2831853 * float(i) / 8.0 + float(ring) * 0.5;
-        acc += texture(uTex, clamp(c + vec2(cos(a), sin(a)) * r, 0.0, 1.0)).rgb; w += 1.0;
-      }
-    }
-    bg = (acc / w) * 0.8;
+    vec2 texOffset = vec2(0.0035, 0.0035);
+    vec3 acc = texture(uTex, c).rgb * 0.22;
+    vec2 off1 = texOffset * 1.5;
+    vec2 off2 = texOffset * 3.5;
+
+    acc += (texture(uTex, c + vec2(off1.x, 0.0)).rgb + texture(uTex, c - vec2(off1.x, 0.0)).rgb) * 0.14;
+    acc += (texture(uTex, c + vec2(0.0, off1.y)).rgb + texture(uTex, c - vec2(0.0, off1.y)).rgb) * 0.14;
+    acc += (texture(uTex, c + vec2(off2.x, 0.0)).rgb + texture(uTex, c - vec2(off2.x, 0.0)).rgb) * 0.08;
+    acc += (texture(uTex, c + vec2(0.0, off2.y)).rgb + texture(uTex, c - vec2(0.0, off2.y)).rgb) * 0.08;
+
+    acc += (texture(uTex, c + off1).rgb + texture(uTex, c - off1).rgb) * 0.05;
+    acc += (texture(uTex, c + vec2(off1.x, -off1.y)).rgb + texture(uTex, c + vec2(-off1.x, off1.y)).rgb) * 0.05;
+    acc += (texture(uTex, c + off2).rgb + texture(uTex, c - off2).rgb) * 0.03;
+    acc += (texture(uTex, c + vec2(off2.x, -off2.y)).rgb + texture(uTex, c + vec2(-off2.x, off2.y)).rgb) * 0.03;
+
+    bg = acc * 0.70; // Кинематографичное затемнение фона на 30%
   }
   vec3 fg = texture(uTex, clamp(f * 0.5 + 0.5, 0.0, 1.0)).rgb;
   outColor = vec4(mix(bg, fg, inside), 1.0);

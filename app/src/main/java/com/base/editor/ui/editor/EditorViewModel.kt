@@ -158,7 +158,7 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
     fun closeBgBar() { bgBarOpen.value = false }
     fun setCanvasBg(b: com.base.editor.core.CanvasBg) {
         if (b == canvasBg.value) return
-        snapshotWhileRebuilding(); canvasBg.value = b; controller.setCanvasBg(b); persist()
+        canvasBg.value = b; controller.setCanvasBg(b); persist()
     }
 
     private var snapshotJob: kotlinx.coroutines.Job? = null
@@ -247,8 +247,10 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
         MediaProbe.displaySize(getApplication(), first.uri, first.type)?.let { (w, h) -> originalAspect = w.toFloat() / h }
     }
 
-    /** Формат холста: пресет или пропорции первого клипа («Оригинал»). Влияет и на превью, и на экспорт (aspect → canvasFor). */
-    fun setFormat(f: com.base.editor.core.CanvasFormat) { snapshotWhileRebuilding(); format.value = f; applyCanvas(); persist() }
+    fun setFormat(f: com.base.editor.core.CanvasFormat) {
+        if (f == format.value) return
+        format.value = f; applyCanvas(); persist()
+    }
     fun openFormat() { controller.pause(); selectedId.value = null; transitionFor.value = null; captionPanelOpen.value = false; bgBarOpen.value = false; formatPanelOpen.value = true }
     fun closeFormat() { formatPanelOpen.value = false }
 
@@ -645,20 +647,13 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
 
     override fun onTextTransform(clip: TextClip, isDraft: Boolean) { controller.updateText(clip) }
 
-    /** Конец жеста: фиксируем и пересобираем композицию; «живая» трансформация держится, пока не покажется новый кадр. */
+    /** Конец жеста: фиксируем в модели без сброса и без перемотки; GL-превью держит точное положение. */
     override fun onGestureEnd() {
         val live = liveClipTransform.value
         if (live != null) {
-            android.util.Log.d("BaseGesture", "жест: событий=$gestureEvents за ${gestureLast - gestureStart} мс, макс. пауза=$gestureMaxGap мс, в обработчике в среднем ${if (gestureEvents > 0) gestureHandlerNs / gestureEvents / 1000 else 0} мкс")
-            val applied = controller.appliedVersion.value
-            glClearNext.value++                          // GL снимет смещение жеста в момент прихода нового кадра (без скачка)
-            controller.commitTransformEdit()
-            viewModelScope.launch {
-                val deadline = System.currentTimeMillis() + 3500
-                while (controller.appliedVersion.value == applied && System.currentTimeMillis() < deadline) delay(40)
-                liveClipTransform.value = null           // страховка: если новый кадр так и не пришёл
-                hideOverlay()
-            }
+            android.util.Log.d("BaseGesture", "жест: событий=$gestureEvents за ${gestureLast - gestureStart} мс, макс. пауза=$gestureMaxGap мс")
+            controller.commitGestureTransform()
+            targetRev.value++
         } else controller.pause()
     }
 
