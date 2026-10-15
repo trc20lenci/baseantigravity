@@ -309,15 +309,17 @@ private class OverlayCompositorSettings(
         val c = clips.firstOrNull { ms >= it.startMs && ms < it.endMs } ?: return plain
         val t = transformAt(c.id, (ms - c.startMs).coerceAtLeast(0L))
         return try {
+            val scale = if (t.scale.isFinite() && t.scale > 0.01f) t.scale.coerceIn(0.05f, 10f) else 1f
+            val rot = if (t.rotationDeg.isFinite()) -t.rotationDeg else 0f
+            val anchorX = if (t.x.isFinite()) (t.x * 2f).coerceIn(-1f, 1f) else 0f
+            val anchorY = if (t.y.isFinite()) (-t.y * 2f).coerceIn(-1f, 1f) else 0f
             androidx.media3.effect.StaticOverlaySettings.Builder()
-                .setScale(t.scale.coerceIn(0.05f, 10f), t.scale.coerceIn(0.05f, 10f))
-                .setRotationDegrees(-t.rotationDeg)                      // в Media3 поворот против часовой, у нас — по часовой на экране
-                // якорь в Media3 допустим ТОЛЬКО в [-1, 1]: центр наложения нельзя вывести за край кадра (иначе исключение в потоке
-                // компоновщика и воспроизведение останавливается)
-                .setBackgroundFrameAnchor((t.x * 2f).coerceIn(-1f, 1f), (-t.y * 2f).coerceIn(-1f, 1f))
+                .setScale(scale, scale)
+                .setRotationDegrees(rot)
+                .setBackgroundFrameAnchor(anchorX, anchorY)
                 .build()
         } catch (e: Exception) {
-            android.util.Log.e("BaseOverlay", "настройки наложения", e)
+            android.util.Log.e("BaseOverlay", "настройки наложения: ${e.message}", e)
             plain
         }
     }

@@ -634,7 +634,6 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
         val hasKeys = keyframes.value[clipId].orEmpty().isNotEmpty()
         val baked = liveClipTransform.value?.takeIf { it.id == clipId }?.baked ?: effectiveTransform(clip)
         liveClipTransform.value = LiveClip(clipId, baked, transform)
-        if (clip.row != 0) controller.refreshLive()
         if (hasKeys) {
             // автоключ как в CapCut: любое движение кадра пальцем фиксирует ключ на текущей миллисекунде
             controller.setKeyframeTransform(clipId, playheadMs.value - clip.startMs, transform)

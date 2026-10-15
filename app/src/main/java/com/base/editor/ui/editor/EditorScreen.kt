@@ -418,30 +418,34 @@ private fun PreviewStage(
     gl?.let { view ->
         // всё, что связано с жестом и кадром, идёт мимо композиции — напрямую в GL-вид
         LaunchedEffect(view) { vm.controller.videoAspect.collect { view.setFrameAspect(it) } }
+        LaunchedEffect(view) { vm.canvasAspect.collect { view.setCanvasAspect(it) } }
+        LaunchedEffect(view) { vm.canvasBg.collect { view.setCanvasBg(it.argb ?: 0) } }
         LaunchedEffect(view) { vm.canvasPx.collect { (w, h) -> view.setBufferSize(w, h) } }
         LaunchedEffect(view) {
             vm.liveClipTransform.collect { l ->
-                val isMain = l != null && vm.clips.value.firstOrNull { it.id == l.id }?.row == 0       // наложения «запечены» не в весь кадр
-                view.setLive(if (isMain) l?.baked else null, if (isMain) l?.current else null)
+                view.setLive(l?.baked, l?.current)
             }
         }
         LaunchedEffect(view) { vm.glClearNext.collect { view.clearLiveOnNextFrame() } }
     }
 
     Box(modifier.fillMaxWidth().background(Color.Black).clipToBounds(), contentAlignment = Alignment.Center) {
-        // рамка выбранного формата: всё, что выходит за её границы, аппаратно отсекается
+        // GL-вид создаётся ОДИН раз и абсолютно статичен в дереве Compose: fillMaxSize() без dynamic aspectRatio!
+        // Декодирование видео и трансформация холста полностью отвязаны друг от друга.
+        AndroidView(
+            factory = { c ->
+                PreviewGlView(c).also { v ->
+                    v.onSurface = { surf -> vm.controller.setOutputSurface(surf) }
+                    gl = v
+                }
+            },
+            update = { },
+            modifier = Modifier.fillMaxSize(),
+        )
+
+        // Рамка выбранного формата: ТОЛЬКО для Compose-слоёв (субтитры, текст, оверлеи жестов).
+        // GLSurfaceView не входит в этот контейнер, исключая пересоздание буферов SurfaceFlinger'ом при смене формата.
         Box(Modifier.aspectRatio(aspectNow.coerceIn(0.2f, 5f)).clipToBounds()) {
-            // GL-вид создаётся ОДИН раз и больше не трогается из Compose: плеер рисует в его SurfaceTexture, жесты — матрицей в шейдере
-            AndroidView(
-                factory = { c ->
-                    PreviewGlView(c).also { v ->
-                        v.onSurface = { surf -> vm.controller.setOutputSurface(surf) }
-                        gl = v
-                    }
-                },
-                update = { },
-                modifier = Modifier.fillMaxSize(),
-            )
             // кадр под курсором напрямую из файла, пока плеер на паузе догоняет позицию при перемотке
             val sf = scrubFrame
             if (scrubOn && (sf != null || cover)) Box(Modifier.fillMaxSize().background(bgSel.argb?.let { Color(it) } ?: Color(0xFF16181D))) {
