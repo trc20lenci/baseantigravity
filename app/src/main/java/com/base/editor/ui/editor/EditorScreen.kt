@@ -421,11 +421,12 @@ private fun PreviewStage(
         LaunchedEffect(view) { vm.controller.videoAspect.collect { view.setFrameAspect(it) } }
         LaunchedEffect(view) { vm.canvasAspect.collect { view.setCanvasAspect(it) } }
         LaunchedEffect(view) { vm.canvasBg.collect { view.setCanvasBackground(it.argb, it == com.base.editor.core.CanvasBg.BLUR) } }
+        LaunchedEffect(view) { vm.blurRadius.collect { view.setBlurRadius(it) } }
         LaunchedEffect(view) { vm.canvasPx.collect { (w, h) -> view.setBufferSize(w, h) } }
         LaunchedEffect(view) {
             vm.liveClipTransform.collect { l ->
                 val targetClip = l?.let { live -> clips.firstOrNull { it.id == live.id } }
-                if (targetClip != null && targetClip.row == 0 && bgSel == com.base.editor.core.CanvasBg.BLACK && clips.none { it.row == com.base.editor.media.CompositionFactory.OVERLAY_ROW }) {
+                if (targetClip != null && targetClip.row == 0) {
                     view.setLive(l.baked, l.current)
                 } else {
                     view.setLive(null, null)

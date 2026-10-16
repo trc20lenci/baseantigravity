@@ -159,7 +159,7 @@ class TimelineController(
                     val request = CompositionRequest(snapshot, canvas, safeMode = safeMode, onTransitionFallback = { _events.tryEmit(it) },
                         liveTransforms = { id, localMs -> _state.value.transformAt(id, localMs) },
                         liveFx = { id -> com.base.editor.media.gl.FxParams(_state.value.chromas[id], _state.value.bgs[id]) },
-                        canvasBg = canvasBg,
+                        canvasBg = com.base.editor.core.CanvasBg.BLACK,
                         blurRadius = { blurRadius })
                     val composition = runCatching { factory.build(request) }
                         .onFailure { Log.e(TAG, "не удалось собрать композицию", it); _events.tryEmit("Не удалось подготовить предпросмотр") }
@@ -213,15 +213,14 @@ class TimelineController(
     /** Размер кадра превью/экспорта. Меняется редко (смена пропорций или качества). */
     var canvasBg: com.base.editor.core.CanvasBg = com.base.editor.core.CanvasBg.BLACK
         private set
-    fun setCanvasBg(bg: com.base.editor.core.CanvasBg) { if (bg == canvasBg) return; canvasBg = bg; requestRebuild() }
+    fun setCanvasBg(bg: com.base.editor.core.CanvasBg) { if (bg == canvasBg) return; canvasBg = bg }
 
     var blurRadius: Float = 1.0f
         private set
     fun setBlurRadius(radius: Float) {
-        val r = radius.coerceIn(0.2f, 3.0f)
+        val r = radius.coerceIn(0.1f, 4.0f)
         if (kotlin.math.abs(r - blurRadius) < 0.01f) return
         blurRadius = r
-        refreshFrameLive()
     }
 
     fun setCanvas(size: Size) {
@@ -335,9 +334,6 @@ class TimelineController(
         publish()
         _committed.tryEmit(Unit)
         _applied.value++
-        if (playerReady && !player.isPlaying) {
-            rerenderCurrentFrame()
-        }
     }
 
     /**
@@ -385,20 +381,23 @@ class TimelineController(
      * Наложения: фото/видео поверх основного. Блок ложится на дорожку наложений (row 2) от курсора, по умолчанию
      * уменьшен вдвое, чтобы было видно, что это наложение; положение меняется жестами на холсте.
      */
-    fun addOverlay(items: List<PickedMedia>) {
-        if (items.isEmpty()) return
+    fun addOverlay(items: List<PickedMedia>): Long? {
+        if (items.isEmpty()) return null
         pause(); model.checkpoint()
         val start = _playhead.value.coerceAtLeast(0L)
         var cursor = start
+        var firstId: Long? = null
         items.forEach { m ->
             val video = m.type == MediaType.VIDEO
             val len = if (video) m.durationMs else IMAGE_DEFAULT_MS
             val id = model.addClip(OVERLAY_ROW, m.type, m.uri, if (video) m.durationMs else 0, len)
+            if (firstId == null) firstId = id
             model.moveClip(id, cursor, 0, -1)
             model.setTransform(id, ClipTransform(scale = 0.5f))
             cursor += len
         }
         afterStructuralEdit()
+        return firstId
     }
 
     /** Музыка из файлов устройства: блок на аудиодорожке (row 1), старт — от курсора. */
@@ -442,14 +441,9 @@ class TimelineController(
         if (_state.value.clips.none { it.row == 0 }) return
         stopAtMs = -1
         scrubEnd()                                                // доставить последнюю позицию перемотки
-        if (playerReady && kotlin.math.abs(player.currentPosition - _playhead.value) > 5) seekPlayerSafely(_playhead.value)     // после «перерисовки кадра» позиция плеера могла сместиться
         if (_playhead.value >= _state.value.totalMs - 50) seekTo(0)
         if (!playerReady) { playWhenReady = true; return }        // композиция ещё готовится: стартуем, как только будет READY
-        if (seekInFlight) {
-            // после перемотки пальцем даём плееру закончить seek и показать кадр — только потом стартуем (иначе звук идёт, а кадр стоит)
-            scope.launch { awaitSeekSettled(2500); if (playerReady) resumePlayer() else playWhenReady = true }
-            return
-        }
+        seekInFlight = false
         resumePlayer()
     }
 
@@ -504,13 +498,16 @@ class TimelineController(
         scrubbedSincePlay = true
         scrubTarget = v
         if (scrubJob?.isActive == true) return
-        scrubJob = scope.launch {
+        scrubJob = scope.launch(dispatchers.main) {
             while (isActive && scrubTarget >= 0) {
-                // не заваливаем декодер: пока предыдущий seek не обработан, новый не отправляем (но не дольше SEEK_INFLIGHT_MAX_MS)
-                if (seekInFlight && SystemClock.uptimeMillis() - lastSeekAt < SEEK_INFLIGHT_MAX_MS) { delay(12); continue }
-                val t = scrubTarget; scrubTarget = -1
-                if (!playerReady || player.playbackState == Player.STATE_IDLE) { pendingSeekMs = t } else seekPlayerSafely(t)
-                delay(SCRUB_MS)
+                val t = scrubTarget
+                scrubTarget = -1
+                if (!playerReady || player.playbackState == Player.STATE_IDLE) {
+                    pendingSeekMs = t
+                } else {
+                    seekPlayerSafely(t)
+                }
+                delay(16) // 60 к/с
             }
         }
     }

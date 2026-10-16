@@ -211,7 +211,7 @@ class CompositionFactory(private val context: Context, private val catalog: Tran
             f.outputStream().use { bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
         }
         val item = MediaItem.Builder().setUri(android.net.Uri.fromFile(f)).setImageDurationMs(durationMs).build()
-        return EditedMediaItem.Builder(item).setDurationUs(durationMs * 1000).setFrameRate(fps).build()
+        return EditedMediaItem.Builder(item).setRemoveAudio(true).setDurationUs(durationMs * 1000).setFrameRate(fps).build()
     }
 
     private fun clipTransformEffect(t: ClipTransform, canvas: Size): Effect =

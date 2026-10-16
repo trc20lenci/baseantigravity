@@ -232,7 +232,11 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
         // файлы, выбранные в галерее по кнопке «+», приходят через почтовый ящик проекта
         viewModelScope.launch {
             for (items in PickedMediaInbox.channel(projectId)) {
-                if (overlayPick) { overlayPick = false; controller.addOverlay(items) } else controller.addMedia(items)
+                if (overlayPick) {
+                    overlayPick = false
+                    val addedId = controller.addOverlay(items)
+                    if (addedId != null) selectedId.value = addedId
+                } else controller.addMedia(items)
             }
         }
         // выбранный клип / панель переходов не должны ссылаться на исчезнувшие клипы
@@ -298,21 +302,10 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
         val t = snapToKeyframe(ms)
         scrubHaptics(t)
         controller.scrubTo(t)
-        scrubPreview(t, exact = false)
     }
 
     override fun scrubEnd() {
         controller.scrubEnd()
-        scrubPreview(playheadMs.value, exact = true)           // палец остановился — точный кадр
-        scrubHideJob?.cancel()
-        scrubHideJob = viewModelScope.launch {
-            // оверлей держится, пока плеер догоняет позицию (BUFFERING), но не дольше нескольких секунд
-            delay(SCRUB_OVERLAY_HOLD_MS)
-            val deadline = System.currentTimeMillis() + 3000
-            while (controller.isBuffering.value && System.currentTimeMillis() < deadline) delay(50)
-            delay(150)
-            hideOverlay()
-        }
     }
 
     /** Кадр под курсором напрямую из файла: плеер на паузе догоняет позицию с задержкой, а этот кадр виден сразу. */
@@ -639,19 +632,8 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
         if (liveClipTransform.value == null) { gestureEvents = 0; gestureStart = nowMs; gestureLast = nowMs; gestureMaxGap = 0; gestureHandlerNs = 0 }
         gestureEvents++; gestureMaxGap = maxOf(gestureMaxGap, nowMs - gestureLast); gestureLast = nowMs
         val clip = clips.value.firstOrNull { it.id == clipId } ?: return
-        val hasKeys = keyframes.value[clipId].orEmpty().isNotEmpty()
         val baked = liveClipTransform.value?.takeIf { it.id == clipId }?.baked ?: effectiveTransform(clip)
         liveClipTransform.value = LiveClip(clipId, baked, transform)
-        if (hasKeys) {
-            // автоключ как в CapCut: любое движение кадра пальцем фиксирует ключ на текущей миллисекунде
-            controller.setKeyframeTransform(clipId, playheadMs.value - clip.startMs, transform)
-        } else {
-            controller.setClipTransform(clipId, transform)
-        }
-        // Если трансформируется наложение или фон не чёрный — просим Media3 обновить кадр вживую
-        if (clip.row == com.base.editor.media.CompositionFactory.OVERLAY_ROW || canvasBg.value != com.base.editor.core.CanvasBg.BLACK) {
-            controller.refreshLive()
-        }
         gestureHandlerNs += System.nanoTime() - t0
     }
 
@@ -663,6 +645,15 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
         liveClipTransform.value = null
         if (live != null) {
             android.util.Log.d("BaseGesture", "жест: событий=$gestureEvents за ${gestureLast - gestureStart} мс, макс. пауза=$gestureMaxGap мс")
+            val clipId = live.id
+            val transform = live.current
+            val clip = clips.value.firstOrNull { it.id == clipId }
+            val hasKeys = keyframes.value[clipId].orEmpty().isNotEmpty()
+            if (hasKeys && clip != null) {
+                controller.setKeyframeTransform(clipId, playheadMs.value - clip.startMs, transform)
+            } else {
+                controller.setClipTransform(clipId, transform)
+            }
             controller.commitGestureTransform()
             targetRev.value++
             glClearNext.value++
@@ -675,8 +666,14 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
         // тап по видео: выделение клипа под курсором; выделенный текст/субтитры — снимаются
         canvasTextId.value = null; selectedCaptionId.value = null; textSub.value = null
         val t = playheadMs.value
-        val clip = clips.value.firstOrNull { it.row == 0 && t >= it.startMs && t < it.endMs }
-        selectedId.value = if (clip != null && selectedId.value != clip.id) clip.id else null
+        // Приоритет отдаётся наложениям (они лежат поверх основного видео)
+        val overlay = clips.value.firstOrNull { it.row == com.base.editor.media.CompositionFactory.OVERLAY_ROW && t >= it.startMs && t < it.endMs }
+        val mainClip = clips.value.firstOrNull { it.row == 0 && t >= it.startMs && t < it.endMs }
+        selectedId.value = when {
+            overlay != null && selectedId.value != overlay.id -> overlay.id
+            mainClip != null && selectedId.value != mainClip.id -> mainClip.id
+            else -> null
+        }
     }
 
     // ───────── текст: правки сразу попадают в слой, отдельных «черновиков» и модальных окон нет ─────────

@@ -50,6 +50,7 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
     @Volatile private var liveBaked: ClipTransform? = null
     @Volatile private var liveCurrent: ClipTransform? = null
     @Volatile private var clearOnNextFrame = false
+    @Volatile private var blurRadiusVal = 1.0f
 
     init {
         setEGLContextClientVersion(2)
@@ -87,6 +88,14 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
         }
     }
 
+    fun setBlurRadius(r: Float) {
+        val clamped = r.coerceIn(0.1f, 4.0f)
+        if (kotlin.math.abs(blurRadiusVal - clamped) > 0.01f) {
+            blurRadiusVal = clamped
+            requestRender()
+        }
+    }
+
     fun setCanvasBg(argb: Int) {
         setCanvasBackground(argb, false)
     }
@@ -119,6 +128,15 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
         private var uTexMat = 0
         private var uMvpMat = 0
         private var uTex = 0
+
+        private var bgProgram = 0
+        private var aBgPos = 0
+        private var aBgUv = 0
+        private var uBgTexMat = 0
+        private var uBgTex = 0
+        private var uBgCover = 0
+        private var uBgBlurRadius = 0
+
         private var texId = 0
         private var st: SurfaceTexture? = null
         private var surface: Surface? = null
@@ -151,6 +169,10 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
                 position(0)
             }
 
+        private val fgPosDirect: FloatBuffer = ByteBuffer.allocateDirect(8 * 4)
+            .order(ByteOrder.nativeOrder())
+            .asFloatBuffer()
+
         private val uvs: FloatBuffer = ByteBuffer.allocateDirect(8 * 4)
             .order(ByteOrder.nativeOrder())
             .asFloatBuffer()
@@ -175,6 +197,16 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
             uTexMat = GLES20.glGetUniformLocation(program, "uTexMat")
             uMvpMat = GLES20.glGetUniformLocation(program, "uMVPMatrix")
             uTex = GLES20.glGetUniformLocation(program, "uTex")
+
+            bgProgram = link(BG_VS, BG_FS)
+            if (bgProgram != 0) {
+                aBgPos = GLES20.glGetAttribLocation(bgProgram, "aPos")
+                aBgUv = GLES20.glGetAttribLocation(bgProgram, "aUv")
+                uBgTexMat = GLES20.glGetUniformLocation(bgProgram, "uTexMat")
+                uBgTex = GLES20.glGetUniformLocation(bgProgram, "uTex")
+                uBgCover = GLES20.glGetUniformLocation(bgProgram, "uCover")
+                uBgBlurRadius = GLES20.glGetUniformLocation(bgProgram, "uBlurRadius")
+            }
 
             val t = IntArray(1)
             GLES20.glGenTextures(1, t, 0)
@@ -268,6 +300,32 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
             }
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
+            val fa = frameAspect.coerceIn(0.05f, 20f)
+
+            // 4.1. Отрисовка размытого фона холста (Pass 1)
+            if (isBlurBg && bgProgram != 0) {
+                val coverX = if (fa >= ca) ca / fa else 1.0f
+                val coverY = if (fa >= ca) 1.0f else fa / ca
+
+                GLES20.glUseProgram(bgProgram)
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+                GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texId)
+                GLES20.glUniform1i(uBgTex, 0)
+                GLES20.glUniformMatrix4fv(uBgTexMat, 1, false, texMat, 0)
+                GLES20.glUniform2f(uBgCover, coverX, coverY)
+                GLES20.glUniform1f(uBgBlurRadius, blurRadiusVal)
+
+                GLES20.glEnableVertexAttribArray(aBgPos)
+                GLES20.glVertexAttribPointer(aBgPos, 2, GLES20.GL_FLOAT, false, 0, posDirect)
+                GLES20.glEnableVertexAttribArray(aBgUv)
+                GLES20.glVertexAttribPointer(aBgUv, 2, GLES20.GL_FLOAT, false, 0, uvs)
+
+                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+
+                GLES20.glDisableVertexAttribArray(aBgPos)
+                GLES20.glDisableVertexAttribArray(aBgUv)
+            }
+
             // 5. Построение MVP-матрицы с компенсацией Aspect Ratio
             val b = liveBaked
             val c = liveCurrent
@@ -282,11 +340,23 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
                     Matrix.setIdentityM(mvpMat, 0)
                 }
             } else {
-                // Нет жеста: кадр уже спозиционирован и вписан плеером Media3 в размер холста
+                // Нет жеста: кадр спозиционирован
                 Matrix.setIdentityM(mvpMat, 0)
             }
 
-            // 6. Отрисовка видеокадра
+            // 6. Подгонка вершин кадра под пропорции видео (ContentScale.Fit)
+            val fw = if (fa >= ca) 1f else (fa / ca).coerceIn(0.01f, 1f)
+            val fh = if (fa >= ca) (ca / fa).coerceIn(0.01f, 1f) else 1f
+            fgPosDirect.position(0)
+            fgPosDirect.put(floatArrayOf(
+                -fw, -fh,
+                 fw, -fh,
+                -fw,  fh,
+                 fw,  fh
+            ))
+            fgPosDirect.position(0)
+
+            // 7. Отрисовка видеокадра (Pass 2)
             GLES20.glUseProgram(program)
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texId)
@@ -295,7 +365,7 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
             GLES20.glUniformMatrix4fv(uMvpMat, 1, false, mvpMat, 0)
 
             GLES20.glEnableVertexAttribArray(aPos)
-            GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 0, posDirect)
+            GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 0, fgPosDirect)
             GLES20.glEnableVertexAttribArray(aUv)
             GLES20.glVertexAttribPointer(aUv, 2, GLES20.GL_FLOAT, false, 0, uvs)
 
@@ -402,6 +472,56 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
             void main() {
                 vec2 uv = (uTexMat * vec4(vUv, 0.0, 1.0)).xy;
                 gl_FragColor = texture2D(uTex, uv);
+            }
+        """
+
+        const val BG_VS = """
+            attribute vec4 aPos;
+            attribute vec2 aUv;
+            varying vec2 vUv;
+            void main() {
+                gl_Position = aPos;
+                vUv = aUv;
+            }
+        """
+
+        const val BG_FS = """
+            #extension GL_OES_EGL_image_external : require
+            precision mediump float;
+            precision mediump int;
+            varying vec2 vUv;
+            uniform samplerExternalOES uTex;
+            uniform mat4 uTexMat;
+            uniform vec2 uCover;
+            uniform float uBlurRadius;
+            void main() {
+                vec2 scaledUv = (vUv - 0.5) * uCover + 0.5;
+                vec2 centerUv = (uTexMat * vec4(scaledUv, 0.0, 1.0)).xy;
+                vec2 texOffset = vec2(0.0035, 0.0035) * uBlurRadius;
+
+                vec3 acc = texture2D(uTex, centerUv).rgb * 0.22;
+                vec2 off1 = texOffset * 1.5;
+                vec2 off2 = texOffset * 3.5;
+
+                acc += (texture2D(uTex, (uTexMat * vec4(scaledUv + vec2(off1.x, 0.0), 0.0, 1.0)).xy).rgb +
+                        texture2D(uTex, (uTexMat * vec4(scaledUv - vec2(off1.x, 0.0), 0.0, 1.0)).xy).rgb) * 0.14;
+                acc += (texture2D(uTex, (uTexMat * vec4(scaledUv + vec2(0.0, off1.y), 0.0, 1.0)).xy).rgb +
+                        texture2D(uTex, (uTexMat * vec4(scaledUv - vec2(0.0, off1.y), 0.0, 1.0)).xy).rgb) * 0.14;
+                acc += (texture2D(uTex, (uTexMat * vec4(scaledUv + vec2(off2.x, 0.0), 0.0, 1.0)).xy).rgb +
+                        texture2D(uTex, (uTexMat * vec4(scaledUv - vec2(off2.x, 0.0), 0.0, 1.0)).xy).rgb) * 0.08;
+                acc += (texture2D(uTex, (uTexMat * vec4(scaledUv + vec2(0.0, off2.y), 0.0, 1.0)).xy).rgb +
+                        texture2D(uTex, (uTexMat * vec4(scaledUv - vec2(0.0, off2.y), 0.0, 1.0)).xy).rgb) * 0.08;
+
+                acc += (texture2D(uTex, (uTexMat * vec4(scaledUv + off1, 0.0, 1.0)).xy).rgb +
+                        texture2D(uTex, (uTexMat * vec4(scaledUv - off1, 0.0, 1.0)).xy).rgb) * 0.05;
+                acc += (texture2D(uTex, (uTexMat * vec4(scaledUv + vec2(off1.x, -off1.y), 0.0, 1.0)).xy).rgb +
+                        texture2D(uTex, (uTexMat * vec4(scaledUv + vec2(-off1.x, off1.y), 0.0, 1.0)).xy).rgb) * 0.05;
+                acc += (texture2D(uTex, (uTexMat * vec4(scaledUv + off2, 0.0, 1.0)).xy).rgb +
+                        texture2D(uTex, (uTexMat * vec4(scaledUv - off2, 0.0, 1.0)).xy).rgb) * 0.03;
+                acc += (texture2D(uTex, (uTexMat * vec4(scaledUv + vec2(off2.x, -off2.y), 0.0, 1.0)).xy).rgb +
+                        texture2D(uTex, (uTexMat * vec4(scaledUv - vec2(off2.x, off2.y), 0.0, 1.0)).xy).rgb) * 0.03;
+
+                gl_FragColor = vec4(acc * 0.70, 1.0);
             }
         """
     }
