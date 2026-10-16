@@ -159,7 +159,7 @@ class TimelineController(
                     val request = CompositionRequest(snapshot, canvas, safeMode = safeMode, onTransitionFallback = { _events.tryEmit(it) },
                         liveTransforms = { id, localMs -> _state.value.transformAt(id, localMs) },
                         liveFx = { id -> com.base.editor.media.gl.FxParams(_state.value.chromas[id], _state.value.bgs[id]) },
-                        canvasBg = com.base.editor.core.CanvasBg.BLACK,
+                        canvasBg = canvasBg,
                         blurRadius = { blurRadius })
                     val composition = runCatching { factory.build(request) }
                         .onFailure { Log.e(TAG, "не удалось собрать композицию", it); _events.tryEmit("Не удалось подготовить предпросмотр") }
@@ -213,7 +213,11 @@ class TimelineController(
     /** Размер кадра превью/экспорта. Меняется редко (смена пропорций или качества). */
     var canvasBg: com.base.editor.core.CanvasBg = com.base.editor.core.CanvasBg.BLACK
         private set
-    fun setCanvasBg(bg: com.base.editor.core.CanvasBg) { if (bg == canvasBg) return; canvasBg = bg }
+    fun setCanvasBg(bg: com.base.editor.core.CanvasBg) {
+        if (bg == canvasBg) return
+        canvasBg = bg
+        requestRebuild()
+    }
 
     var blurRadius: Float = 1.0f
         private set
@@ -221,6 +225,7 @@ class TimelineController(
         val r = radius.coerceIn(0.1f, 4.0f)
         if (kotlin.math.abs(r - blurRadius) < 0.01f) return
         blurRadius = r
+        refreshFrameLive()
     }
 
     fun setCanvas(size: Size) {
@@ -334,6 +339,7 @@ class TimelineController(
         publish()
         _committed.tryEmit(Unit)
         _applied.value++
+        if (playerReady && !player.isPlaying) rerenderCurrentFrame()
     }
 
     /**
@@ -442,6 +448,11 @@ class TimelineController(
         stopAtMs = -1
         scrubEnd()                                                // доставить последнюю позицию перемотки
         if (_playhead.value >= _state.value.totalMs - 50) seekTo(0)
+        if (player.playbackState == Player.STATE_IDLE) {
+            seekInFlight = false
+            resumePlayer()
+            return
+        }
         if (!playerReady) { playWhenReady = true; return }        // композиция ещё готовится: стартуем, как только будет READY
         seekInFlight = false
         resumePlayer()
@@ -486,9 +497,8 @@ class TimelineController(
     private var scrubJob: Job? = null
 
     /**
-     * Перемотка при ведении пальцем по таймлайну (десятки вызовов в секунду). Курсор в интерфейсе двигается сразу,
-     * а в плеер уходит не больше одного seek за [SCRUB_MS] (≈30 к/с) и всегда с самой свежей позицией:
-     * промежуточные цели отбрасываются, очередь не копится, главный поток не забивается командами.
+     * Адаптивная живая перемотка: выдаёт кадры непрерывно на максимальной скорости аппаратного декодера (до 60 к/с).
+     * Не отменяет предыдущий кадр до его вывода на экран (исключая "застывание" картинки при ведении пальцем).
      */
     fun scrubTo(ms: Long) {
         val total = _state.value.totalMs
@@ -499,15 +509,26 @@ class TimelineController(
         scrubTarget = v
         if (scrubJob?.isActive == true) return
         scrubJob = scope.launch(dispatchers.main) {
-            while (isActive && scrubTarget >= 0) {
+            while (isActive) {
                 val t = scrubTarget
-                scrubTarget = -1
-                if (!playerReady || player.playbackState == Player.STATE_IDLE) {
-                    pendingSeekMs = t
-                } else {
-                    seekPlayerSafely(t)
+                if (t >= 0) {
+                    // Если декодер ещё декодирует предыдущий кадр, даём ему до 45 мс завершить отрисовку
+                    if (seekInFlight && (SystemClock.uptimeMillis() - lastSeekAt) < 45L) {
+                        delay(8)
+                        continue
+                    }
+                    scrubTarget = -1
+                    if (!playerReady || player.playbackState == Player.STATE_IDLE) {
+                        pendingSeekMs = t
+                    } else {
+                        seekPlayerSafely(t)
+                    }
                 }
-                delay(16) // 60 к/с
+                delay(16)
+                if (scrubTarget < 0 && !seekInFlight) {
+                    delay(32)
+                    if (scrubTarget < 0) break
+                }
             }
         }
     }
@@ -625,14 +646,15 @@ class TimelineController(
     override fun onPlayerError(error: PlaybackException) {
         Log.e(TAG, "ошибка плеера: ${error.errorCodeName}", error)
         val codecRelated = error.errorCode in CODEC_ERRORS
-        if (codecRelated && !safeMode) {
+        if (!safeMode) {
             safeMode = true
-            _events.tryEmit("Проблема с декодером или GPU — переходы временно отключены")
+            _events.tryEmit("Сброс графического конвейера...")
             requestRebuild()
         } else {
             Log.e("BasePlayer", "ошибка плеера", error)
             val root = generateSequence<Throwable>(error) { it.cause }.last()
             _events.tryEmit("Не удалось воспроизвести: ${error.errorCodeName} (${root.javaClass.simpleName}: ${root.message?.take(80)})")
+            requestRebuild()
         }
     }
 

@@ -425,11 +425,15 @@ private fun PreviewStage(
         LaunchedEffect(view) { vm.canvasPx.collect { (w, h) -> view.setBufferSize(w, h) } }
         LaunchedEffect(view) {
             vm.liveClipTransform.collect { l ->
-                val targetClip = l?.let { live -> clips.firstOrNull { it.id == live.id } }
-                if (targetClip != null && targetClip.row == 0) {
-                    view.setLive(l.baked, l.current)
-                } else {
+                if (l == null) {
                     view.setLive(null, null)
+                } else {
+                    val clipRow = vm.controller.state.value.clips.firstOrNull { it.id == l.id }?.row ?: 0
+                    if (clipRow == 0) {
+                        view.setLive(l.baked, l.current)
+                    } else {
+                        view.setLive(null, null)
+                    }
                 }
             }
         }

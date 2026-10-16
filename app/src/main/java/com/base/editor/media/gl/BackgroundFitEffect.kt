@@ -109,23 +109,14 @@ void main() {
 
   vec3 bg = uBgColor;
   if (uBlurBg == 1) {
-    // Высококачественный Гауссов блюр с билинейной выборкой и регулируемым радиусом
+    // Оптимизированный 5-точечный билинейный фильтр для слабых мобильных GPU (Mali-G52/G57)
     vec2 c = (vUv - 0.5) * uCover + 0.5;
-    vec2 texOffset = vec2(0.0035, 0.0035) * uBlurRadius;
-    vec3 acc = texture(uTex, c).rgb * 0.22;
-    vec2 off1 = texOffset * 1.5;
-    vec2 off2 = texOffset * 3.5;
-
-    acc += (texture(uTex, c + vec2(off1.x, 0.0)).rgb + texture(uTex, c - vec2(off1.x, 0.0)).rgb) * 0.14;
-    acc += (texture(uTex, c + vec2(0.0, off1.y)).rgb + texture(uTex, c - vec2(0.0, off1.y)).rgb) * 0.14;
-    acc += (texture(uTex, c + vec2(off2.x, 0.0)).rgb + texture(uTex, c - vec2(off2.x, 0.0)).rgb) * 0.08;
-    acc += (texture(uTex, c + vec2(0.0, off2.y)).rgb + texture(uTex, c - vec2(0.0, off2.y)).rgb) * 0.08;
-
-    acc += (texture(uTex, c + off1).rgb + texture(uTex, c - off1).rgb) * 0.05;
-    acc += (texture(uTex, c + vec2(off1.x, -off1.y)).rgb + texture(uTex, c + vec2(-off1.x, off1.y)).rgb) * 0.05;
-    acc += (texture(uTex, c + off2).rgb + texture(uTex, c - off2).rgb) * 0.03;
-    acc += (texture(uTex, c + vec2(off2.x, -off2.y)).rgb + texture(uTex, c + vec2(-off2.x, off2.y)).rgb) * 0.03;
-
+    vec2 off = vec2(0.005, 0.005) * uBlurRadius;
+    vec3 acc = texture(uTex, c).rgb * 0.36;
+    acc += texture(uTex, c + off).rgb * 0.16;
+    acc += texture(uTex, c - off).rgb * 0.16;
+    acc += texture(uTex, c + vec2(-off.x, off.y)).rgb * 0.16;
+    acc += texture(uTex, c + vec2(off.x, -off.y)).rgb * 0.16;
     bg = acc * 0.70; // Кинематографичное затемнение фона на 30%
   }
   vec3 fg = texture(uTex, clamp(f * 0.5 + 0.5, 0.0, 1.0)).rgb;
