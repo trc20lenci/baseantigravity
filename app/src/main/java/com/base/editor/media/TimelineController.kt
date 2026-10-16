@@ -159,7 +159,7 @@ class TimelineController(
                     val request = CompositionRequest(snapshot, canvas, safeMode = safeMode, onTransitionFallback = { _events.tryEmit(it) },
                         liveTransforms = { id, localMs -> _state.value.transformAt(id, localMs) },
                         liveFx = { id -> com.base.editor.media.gl.FxParams(_state.value.chromas[id], _state.value.bgs[id]) },
-                        canvasBg = canvasBg,
+                        canvasBg = com.base.editor.core.CanvasBg.BLACK,
                         blurRadius = { blurRadius })
                     val composition = runCatching { factory.build(request) }
                         .onFailure { Log.e(TAG, "не удалось собрать композицию", it); _events.tryEmit("Не удалось подготовить предпросмотр") }
@@ -496,6 +496,10 @@ class TimelineController(
     private var bufferingJob: Job? = null
     private var scrubJob: Job? = null
 
+    fun onFrameRendered() {
+        seekInFlight = false
+    }
+
     /**
      * Адаптивная живая перемотка: выдаёт кадры непрерывно на максимальной скорости аппаратного декодера (до 60 к/с).
      * Не отменяет предыдущий кадр до его вывода на экран (исключая "застывание" картинки при ведении пальцем).
@@ -512,9 +516,10 @@ class TimelineController(
             while (isActive) {
                 val t = scrubTarget
                 if (t >= 0) {
-                    // Если декодер ещё декодирует предыдущий кадр, даём ему до 45 мс завершить отрисовку
-                    if (seekInFlight && (SystemClock.uptimeMillis() - lastSeekAt) < 45L) {
-                        delay(8)
+                    val now = SystemClock.uptimeMillis()
+                    // Если декодер ещё декодирует предыдущий кадр, даём ему завершить вывод на экран (до 80 мс)
+                    if (seekInFlight && (now - lastSeekAt) < 80L) {
+                        delay(6)
                         continue
                     }
                     scrubTarget = -1
@@ -524,9 +529,9 @@ class TimelineController(
                         seekPlayerSafely(t)
                     }
                 }
-                delay(16)
+                delay(8)
                 if (scrubTarget < 0 && !seekInFlight) {
-                    delay(32)
+                    delay(24)
                     if (scrubTarget < 0) break
                 }
             }
@@ -601,7 +606,9 @@ class TimelineController(
     override fun onIsPlayingChanged(isPlaying: Boolean) { _playing.value = isPlaying }
 
     override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int) {
-        if (reason == Player.DISCONTINUITY_REASON_SEEK || reason == Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT) seekInFlight = false
+        if (reason == Player.DISCONTINUITY_REASON_SEEK || reason == Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT) {
+            if (SystemClock.uptimeMillis() - lastSeekAt > 100L) seekInFlight = false
+        }
     }
 
     override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
@@ -612,7 +619,9 @@ class TimelineController(
     override fun onPlaybackStateChanged(playbackState: Int) {
         Log.d("BasePlayer", "состояние=$playbackState pos=${player.currentPosition}")
         _buffering.value = playbackState == Player.STATE_BUFFERING
-        if (playbackState == Player.STATE_READY) seekInFlight = false
+        if (playbackState == Player.STATE_READY) {
+            if (SystemClock.uptimeMillis() - lastSeekAt > 100L) seekInFlight = false
+        }
         // сторожок: если буферизация затянулась (декодер завис), перемещаем плеер в ту же позицию и переподключаем поверхность
         bufferingJob?.cancel()
         if (playbackState == Player.STATE_BUFFERING) bufferingJob = scope.launch {

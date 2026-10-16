@@ -634,6 +634,10 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
         val clip = clips.value.firstOrNull { it.id == clipId } ?: return
         val baked = liveClipTransform.value?.takeIf { it.id == clipId }?.baked ?: effectiveTransform(clip)
         liveClipTransform.value = LiveClip(clipId, baked, transform)
+        if (clip.row == com.base.editor.media.CompositionFactory.OVERLAY_ROW) {
+            controller.setClipTransform(clipId, transform)
+            controller.refreshLive()
+        }
         gestureHandlerNs += System.nanoTime() - t0
     }
 
@@ -642,8 +646,8 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
     /** Конец жеста: фиксируем в модели без сброса и без перемотки; GL-превью держит точное положение. */
     override fun onGestureEnd() {
         val live = liveClipTransform.value
-        liveClipTransform.value = null
         if (live != null) {
+            glClearNext.value++
             android.util.Log.d("BaseGesture", "жест: событий=$gestureEvents за ${gestureLast - gestureStart} мс, макс. пауза=$gestureMaxGap мс")
             val clipId = live.id
             val transform = live.current
@@ -656,7 +660,7 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
             }
             controller.commitGestureTransform()
             targetRev.value++
-            glClearNext.value++
+            liveClipTransform.value = null
         } else controller.pause()
     }
 

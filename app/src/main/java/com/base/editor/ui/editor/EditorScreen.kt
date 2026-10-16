@@ -447,6 +447,7 @@ private fun PreviewStage(
             factory = { c ->
                 PreviewGlView(c).also { v ->
                     v.onSurface = { surf -> vm.controller.setOutputSurface(surf) }
+                    v.onFrameRendered = { vm.controller.onFrameRendered() }
                     gl = v
                 }
             },

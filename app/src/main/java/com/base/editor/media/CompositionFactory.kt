@@ -171,8 +171,8 @@ class CompositionFactory(private val context: Context, private val catalog: Tran
             }
             a.build()
         }
-        // порядок: наложения → основная → музыка (видео-входы нумеруются по порядку, наложения — «сверху»)
-        val builder = Composition.Builder(listOfNotNull(overlaySeq, seq.build(), audioSeq))
+        // порядок: основная (вход 0, первичный тактовый генератор) → наложения (вход 1, поверх основной) → музыка
+        val builder = Composition.Builder(listOfNotNull(seq.build(), overlaySeq, audioSeq))
         if (overlaySeq != null) {
             val live = req.liveTransforms
             val settings = OverlayCompositorSettings(req.canvas, overlayClips) { id, ms -> live?.invoke(id, ms) ?: req.state.transformAt(id, ms) }
@@ -295,19 +295,25 @@ private class OverlayCompositorSettings(
 
     override fun getOverlaySettings(inputId: Int, presentationTimeUs: Long): androidx.media3.common.OverlaySettings {
         val plain = androidx.media3.effect.StaticOverlaySettings.Builder().build()
-        if (inputId != 0) return plain
+        // Вход 0 — основная дорожка (базовая геометрия 1:1 на весь холст)
+        if (inputId == 0) return plain
+
+        // Вход 1 — наложение (масштаб, угол поворота, смещение и альфа)
         val ms = presentationTimeUs / 1000
-        val c = clips.firstOrNull { ms >= it.startMs && ms < it.endMs } ?: return plain
+        val c = clips.firstOrNull { ms >= it.startMs && ms < it.endMs }
+            ?: return androidx.media3.effect.StaticOverlaySettings.Builder().setAlphaScale(0f).build()
+
         val t = transformAt(c.id, (ms - c.startMs).coerceAtLeast(0L))
         return try {
             val scale = if (t.scale.isFinite() && t.scale > 0.01f) t.scale.coerceIn(0.05f, 10f) else 1f
             val rot = if (t.rotationDeg.isFinite()) -t.rotationDeg else 0f
-            val anchorX = if (t.x.isFinite()) (t.x * 2f).coerceIn(-1f, 1f) else 0f
-            val anchorY = if (t.y.isFinite()) (-t.y * 2f).coerceIn(-1f, 1f) else 0f
+            val anchorX = if (t.x.isFinite()) (t.x * 2f).coerceIn(-2f, 2f) else 0f
+            val anchorY = if (t.y.isFinite()) (-t.y * 2f).coerceIn(-2f, 2f) else 0f
             androidx.media3.effect.StaticOverlaySettings.Builder()
                 .setScale(scale, scale)
                 .setRotationDegrees(rot)
                 .setBackgroundFrameAnchor(anchorX, anchorY)
+                .setAlphaScale(1f)
                 .build()
         } catch (e: Exception) {
             android.util.Log.e("BaseOverlay", "настройки наложения: ${e.message}", e)
