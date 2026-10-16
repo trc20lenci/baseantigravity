@@ -134,7 +134,8 @@ class CompositionFactory(private val context: Context, private val catalog: Tran
         }
 
         // наложения (фото/видео поверх основного): отдельная видео-последовательность на всю длину проекта.
-        // Зазоры заполняются нативным o.addGap, исключая лишнюю декодировку PNG и сбросы кодеков.
+        // Зазоры заполняются прозрачным изображением, гарантируя непрерывный поток кадров в VideoCompositor
+        // и исключая deadlock/зависание декодера Media3 в STATE_BUFFERING.
         val overlayClips = req.state.clips.filter { it.row == OVERLAY_ROW && it.type != MediaType.AUDIO }.sortedBy { it.startMs }
         val fpsUsed = req.fps ?: FRAME_RATE
         val overlaySeq = if (overlayClips.isEmpty()) null else {
@@ -142,7 +143,7 @@ class CompositionFactory(private val context: Context, private val catalog: Tran
             val o = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_VIDEO))
             var cur = 0L
             for (c in overlayClips) {
-                if (c.startMs > cur) o.addGap((c.startMs - cur) * 1000)
+                if (c.startMs > cur) o.addItem(transparentFiller(c.startMs - cur, fpsUsed))
                 val fx = mutableListOf<Effect>()
                 if (!req.safeMode && (req.state.chromas.containsKey(c.id) || req.state.bgs.containsKey(c.id))) {
                     val id = c.id
@@ -155,7 +156,7 @@ class CompositionFactory(private val context: Context, private val catalog: Tran
                 o.addItem(editedItem(c, fx, removeAudio = true, fps = fpsUsed))
                 cur = c.endMs
             }
-            if (totalMs > cur) o.addGap((totalMs - cur) * 1000)
+            if (totalMs > cur) o.addItem(transparentFiller(totalMs - cur, fpsUsed))
             o.build()
         }
 
@@ -200,6 +201,17 @@ class CompositionFactory(private val context: Context, private val catalog: Tran
      * Положение кадра на холсте. Поворот считается в «квадратных» единицах (поправка на пропорции кадра),
      * иначе картинка перекашивалась бы. Размер кадра не меняется: лишнее обрезается, пустое заливается чёрным.
      */
+
+    /** Прозрачная картинка на [durationMs]: заполняет «пустые» места последовательности наложений. */
+    private fun transparentFiller(durationMs: Long, fps: Int): EditedMediaItem {
+        val f = java.io.File(context.cacheDir, "transparent.png")
+        if (!f.exists() || f.length() == 0L) {
+            val bmp = android.graphics.Bitmap.createBitmap(16, 16, android.graphics.Bitmap.Config.ARGB_8888)
+            f.outputStream().use { bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+        }
+        val item = MediaItem.Builder().setUri(android.net.Uri.fromFile(f)).setImageDurationMs(durationMs).build()
+        return EditedMediaItem.Builder(item).setRemoveAudio(true).setDurationUs(durationMs * 1000).setFrameRate(fps).build()
+    }
 
     private fun clipTransformEffect(t: ClipTransform, canvas: Size): Effect =
         MatrixTransformation { transformMatrix(t, canvas) }

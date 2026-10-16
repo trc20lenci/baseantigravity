@@ -104,7 +104,10 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
 
     fun setLive(baked: ClipTransform?, current: ClipTransform?) {
         if (baked == null || current == null) {
-            if (!clearOnNextFrame) {
+            if (liveBaked != null && liveCurrent != null) {
+                clearOnNextFrame = true
+                clearRequestedAt = System.currentTimeMillis()
+            } else if (!clearOnNextFrame) {
                 liveBaked = null
                 liveCurrent = null
                 requestRender()

@@ -96,8 +96,11 @@ class TimelineController(
         val surf = outSurface
         Log.d("BasePlayer", "вывод: surface=${surf != null} размер=${canvas.width}x${canvas.height}")
         runCatching {
-            if (surf == null) player.clearVideoSurface()
-            else player.setVideoSurface(surf, androidx.media3.common.util.Size(canvas.width, canvas.height))
+            if (surf != null && surf.isValid) {
+                player.setVideoSurface(surf, androidx.media3.common.util.Size(canvas.width, canvas.height))
+            } else {
+                runCatching { player.clearVideoSurface() }
+            }
         }.onFailure { Log.w(TAG, "поверхность вывода", it) }
     }
 
