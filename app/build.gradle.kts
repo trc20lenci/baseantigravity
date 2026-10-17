@@ -37,8 +37,8 @@ android {
         applicationId = "com.base.editor"
         minSdk = 29          // loadThumbnail(), MediaStore scoped storage
         targetSdk = 36
-        versionCode = 2
-        versionName = "0.1.0"
+        versionCode = 3
+        versionName = "0.3.0"
         // нативные библиотеки (Vosk, LiteRT); x86 нужен только эмуляторам и сильно раздувает APK
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }
