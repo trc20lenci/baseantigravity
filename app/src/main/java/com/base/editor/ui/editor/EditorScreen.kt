@@ -176,6 +176,9 @@ fun EditorScreen(onClose: () -> Unit, onAddMedia: () -> Unit, vm: EditorViewMode
     val customBgUri by vm.customBgUri.collectAsStateWithLifecycle()
     val projectBgImages by vm.projectBgImages.collectAsStateWithLifecycle()
     val pagTemplates by vm.pagTemplates.collectAsStateWithLifecycle()
+    val mainToolScroll = androidx.compose.foundation.rememberScrollState()
+    val mediaToolScroll = androidx.compose.foundation.rememberScrollState()
+    val audioToolScroll = androidx.compose.foundation.rememberScrollState()
 
     SideEffect { vm.onRequestAddMedia = onAddMedia }
     val hapticView = androidx.compose.ui.platform.LocalView.current
@@ -314,7 +317,7 @@ fun EditorScreen(onClose: () -> Unit, onAddMedia: () -> Unit, vm: EditorViewMode
                     TimelineHost(vm, clips, transitions, captionItems, texts, keyframes, selected, selText, selCaption)
                     Crossfade(mode, animationSpec = androidx.compose.animation.core.tween(160, easing = EaseOutStrong), label = "toolbar", modifier = Modifier.fillMaxWidth().height(toolbarH.dp).background(BaseColors.DarkPanel)) { m ->
                         when (m) {
-                            ToolMode.MAIN -> ScrollToolRow {
+                            ToolMode.MAIN -> ScrollToolRow(mainToolScroll) {
                                 ToolButton(Lucide.Scissors, "Изменить") { vm.selectAtPlayhead() }
                                 ToolButton(Lucide.Music, "Звук", onClick = vm::addAudio)
                                 ToolButton(Lucide.Type, "Текст", onClick = vm::openNewText)
@@ -323,7 +326,7 @@ fun EditorScreen(onClose: () -> Unit, onAddMedia: () -> Unit, vm: EditorViewMode
                                 ToolButton(Lucide.Layers, "Наложение", onClick = vm::addOverlay)
                                 ToolButton(Lucide.Image, "Фон", onClick = vm::openBgBar)
                             }
-                            ToolMode.MEDIA -> ScrollToolRow {
+                            ToolMode.MEDIA -> ScrollToolRow(mediaToolScroll) {
                                 ToolButton(Lucide.ChevronLeft, "Назад") { vm.select(null) }
                                 ToolButton(Lucide.SquareSplitHorizontal, "Разделить", onClick = vm::split)
                                 ToolButton(Lucide.Copy, "Копия", onClick = vm::duplicateSelected)
@@ -355,7 +358,7 @@ fun EditorScreen(onClose: () -> Unit, onAddMedia: () -> Unit, vm: EditorViewMode
                                     onBack = vm::closeBgBar,
                                 )
                             }
-                            ToolMode.AUDIO -> ScrollToolRow {
+                            ToolMode.AUDIO -> ScrollToolRow(audioToolScroll) {
                                 ToolButton(Lucide.ChevronLeft, "Назад") { vm.select(null) }
                                 ToolButton(Lucide.SquareSplitHorizontal, "Разделить", onClick = vm::split)
                                 ToolButton(Lucide.Copy, "Копия", onClick = vm::duplicateSelected)
@@ -856,9 +859,12 @@ private fun ToolRow(content: @Composable RowScope.() -> Unit) {
 
 /** Ряд кнопок с горизонтальной прокруткой — для панелей, где инструментов больше, чем помещается в экран. */
 @Composable
-private fun ScrollToolRow(content: @Composable RowScope.() -> Unit) {
+private fun ScrollToolRow(
+    scrollState: androidx.compose.foundation.ScrollState = androidx.compose.foundation.rememberScrollState(),
+    content: @Composable RowScope.() -> Unit
+) {
     androidx.compose.runtime.CompositionLocalProvider(LocalToolScroll provides true) {
-        Row(Modifier.fillMaxSize().horizontalScroll(rememberScrollState()).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically, content = content)
+        Row(Modifier.fillMaxSize().horizontalScroll(scrollState).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically, content = content)
     }
 }
 

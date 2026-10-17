@@ -83,9 +83,9 @@ class CompositionFactory(private val context: Context, private val catalog: Tran
         val inbound = req.state.transitions.associateBy { it.rightId }
         val outbound = req.state.transitions.associateBy { it.leftId }
 
-        val hasAudioInMain = !req.removeAudio && main.any { it.type == MediaType.VIDEO }
-        val trackTypes = if (hasAudioInMain) setOf(C.TRACK_TYPE_AUDIO, C.TRACK_TYPE_VIDEO) else setOf(C.TRACK_TYPE_VIDEO)
-        val seq = EditedMediaItemSequence.Builder(trackTypes)
+        // Основная последовательность строго по видео: фото и видео без аудиодорожки в этом графе.
+        // Это полностью исключает зависание BitmapAssetLoader в ожидании аудиопотока (~7 сек) и на стыках фото.
+        val seq = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_VIDEO))
         var cursorMs = 0L
         for (clip in main) {
             if (clip.startMs > cursorMs) seq.addGap((clip.startMs - cursorMs) * 1000)
@@ -139,7 +139,7 @@ class CompositionFactory(private val context: Context, private val catalog: Tran
                 // захват хвоста — после перехода, чтобы в мост попал финальный кадр клипа
                 outbound[clip.id]?.let { effects += TailCaptureEffect(bridges.getOrPut(clip.id) { TransitionBridge() }, clip.lengthMs * 1000L) }
             }
-            seq.addItem(editedItem(clip, effects, req.removeAudio, req.fps ?: FRAME_RATE))
+            seq.addItem(editedItem(clip, effects, removeAudio = true, removeVideo = false, fps = req.fps ?: FRAME_RATE))
             cursorMs = clip.endMs
         }
 
@@ -153,6 +153,28 @@ class CompositionFactory(private val context: Context, private val catalog: Tran
             }
         }
 
+        // звук видео основной дорожки: отдельная параллельная звуковая последовательность.
+        // Фотографии и зазоры заполняются тишиной (addGap), благодаря чему Media3 не зависает
+        // в ожидании несуществующего аудиопотока от BitmapAssetLoader (~7 сек) и не стопорится на стыках фото.
+        val mainVideos = main.filter { it.type == MediaType.VIDEO }
+        val mainAudioSeq = if (req.removeAudio || mainVideos.isEmpty()) null else {
+            val a = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_AUDIO))
+            var cur = 0L
+            for (clip in main) {
+                if (clip.type == MediaType.VIDEO) {
+                    if (clip.startMs > cur) {
+                        a.addGap((clip.startMs - cur) * 1000L)
+                    }
+                    a.addItem(editedItem(clip, emptyList(), removeAudio = false, removeVideo = true, fps = fpsUsed))
+                    cur = clip.endMs
+                }
+            }
+            if (cur < totalProjectMs) {
+                a.addGap((totalProjectMs - cur) * 1000L)
+            }
+            a.build()
+        }
+
         // наложения (фото/видео поверх основного): в превью рендерятся аппаратно на Compose/GL слое,
         // исключая тяжелый MultipleInputVideoGraph и падения DefaultVideoCompositor.isInputEnded при перемотке.
         val overlayClips = req.state.clips.filter { it.row == OVERLAY_ROW && it.type != MediaType.AUDIO }.sortedBy { it.startMs }
@@ -164,7 +186,7 @@ class CompositionFactory(private val context: Context, private val catalog: Tran
             var cur = 0L
             for (c in music) {
                 if (c.startMs > cur) a.addGap((c.startMs - cur) * 1000)
-                a.addItem(editedItem(c, emptyList(), removeAudio = false, fps = fpsUsed))
+                a.addItem(editedItem(c, emptyList(), removeAudio = false, removeVideo = true, fps = fpsUsed))
                 cur = c.endMs
             }
             if (cur < totalProjectMs) {
@@ -180,7 +202,7 @@ class CompositionFactory(private val context: Context, private val catalog: Tran
             var cur = 0L
             for (c in overlayVideos) {
                 if (c.startMs > cur) a.addGap((c.startMs - cur) * 1000)
-                a.addItem(editedItem(c, emptyList(), removeAudio = false, fps = fpsUsed))
+                a.addItem(editedItem(c, emptyList(), removeAudio = false, removeVideo = true, fps = fpsUsed))
                 cur = c.endMs
             }
             if (cur < totalProjectMs) {
@@ -188,7 +210,7 @@ class CompositionFactory(private val context: Context, private val catalog: Tran
             }
             a.build()
         }
-        val builder = Composition.Builder(listOfNotNull(seq.build(), audioSeq, overlayAudioSeq))
+        val builder = Composition.Builder(listOfNotNull(seq.build(), mainAudioSeq, audioSeq, overlayAudioSeq))
 
         // эффект уровня композиции: время кадров — время всего проекта, слои совпадают с таймлайном
         val overlays = buildList<androidx.media3.effect.TextureOverlay> {
@@ -253,7 +275,7 @@ class CompositionFactory(private val context: Context, private val catalog: Tran
         }
     }
 
-    private fun editedItem(c: Clip, videoEffects: List<Effect>, removeAudio: Boolean, fps: Int = FRAME_RATE): EditedMediaItem {
+    private fun editedItem(c: Clip, videoEffects: List<Effect>, removeAudio: Boolean, removeVideo: Boolean = false, fps: Int = FRAME_RATE): EditedMediaItem {
         val item = MediaItem.Builder().setUri(c.uri)
         val edited: EditedMediaItem.Builder
         if (c.type == MediaType.IMAGE) {
@@ -278,7 +300,7 @@ class CompositionFactory(private val context: Context, private val catalog: Tran
             if (abs(c.volume - 1f) > 1e-3f) listOf(volumeProcessor(c.volume)) else emptyList()
         return edited.setEffects(Effects(audioFx, videoEffects))
             .setRemoveAudio(if (c.type == MediaType.IMAGE) true else removeAudio)
-            .setRemoveVideo(c.type == MediaType.AUDIO)      // музыка идёт отдельной звуковой последовательностью
+            .setRemoveVideo(if (c.type == MediaType.AUDIO) true else removeVideo)      // музыка/аудиодорожки идут без видео
             .build()
     }
 

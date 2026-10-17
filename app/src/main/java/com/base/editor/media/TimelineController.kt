@@ -549,7 +549,12 @@ class TimelineController(
             resumePlayer()
             return
         }
-        if (!playerReady) { playWhenReady = true; return }        // композиция ещё готовится: стартуем, как только будет READY
+        if (!playerReady) {
+            playWhenReady = true
+            runCatching { player.play() }
+            seekPlayerSafely(player.currentPosition)
+            return
+        }
         seekInFlight = false
         resumePlayer()
     }
@@ -690,9 +695,11 @@ class TimelineController(
             if (composition == null) { player.stop(); return }
             ensurePlayer(composition.sequences.count { C.TRACK_TYPE_VIDEO in it.trackTypes } > 1)
             Log.d("BasePlayer", "setComposition: последовательностей=${composition.sequences.size}, холст=${canvas.width}x${canvas.height}, multi=$playerMulti")
-            pendingSeekMs = _playhead.value
-            player.setComposition(composition, _playhead.value)
+            val targetPos = _playhead.value
+            pendingSeekMs = targetPos
+            player.setComposition(composition, targetPos)
             player.prepare()
+            seekPlayerSafely(if (targetPos == 0L && _state.value.totalMs > 1L) 1L else targetPos)
         } catch (e: Exception) {
             Log.e(TAG, "setComposition не удался", e)
             _events.tryEmit("Не удалось открыть файл: возможно, он повреждён или не поддерживается")
@@ -805,7 +812,7 @@ class TimelineController(
         const val SCRUB_MS = 33L
         const val SEEK_INFLIGHT_MAX_MS = 250L
         const val SURFACE_REBIND_MS = 70L
-        const val BUFFERING_WATCHDOG_MS = 4000L
+        const val BUFFERING_WATCHDOG_MS = 800L
         const val AUDIO_ROW = 1
         const val OVERLAY_ROW = 2
         val CODEC_ERRORS = setOf(
