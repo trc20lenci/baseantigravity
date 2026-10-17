@@ -34,6 +34,9 @@ data class TextClip(
     val shadowColor: Long = 0,
     val shadowBlur: Float = 0f,
     val shadowDy: Float = 0f,
+    val glowColor: Long = 0,
+    val glowRadius: Float = 0f,
+    val bgCornerRadius: Float = 8f,
     /** Пресет стиля (для подсветки в карусели) и анимация появления из [TextAnimation]. */
     val styleId: String = "plain",
     val animId: String = "none",

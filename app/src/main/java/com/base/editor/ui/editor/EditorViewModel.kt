@@ -128,6 +128,8 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
     /** Текст, который сейчас редактируется (новый или существующий). */
     /** true — открыта строка ввода текста (клавиатура); false — показана нижняя панель инструментов текста. */
     val textInputOpen = MutableStateFlow(false)
+    val textEditorTab = MutableStateFlow(TextEditorTab.FONTS)
+    val keyframesRevision = MutableStateFlow(0)
     private val pagStore = PagTemplateStore(app)
     /** Шаблоны анимированных титров (.pag): встроенные и импортированные пользователем. */
     val pagTemplates = MutableStateFlow(pagStore.list())
@@ -154,12 +156,32 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
     // ───────── фон холста ─────────
     val canvasBg = MutableStateFlow(com.base.editor.core.CanvasBg.BLACK)
     val blurRadius = MutableStateFlow(1.0f)
+    val customBgUri = MutableStateFlow<String?>(null)
+    val projectBgImages = MutableStateFlow<List<String>>(emptyList())
     val bgBarOpen = MutableStateFlow(false)
     fun openBgBar() { controller.pause(); select(null); formatPanelOpen.value = false; captionPanelOpen.value = false; bgBarOpen.value = true }
     fun closeBgBar() { bgBarOpen.value = false }
     fun setCanvasBg(b: com.base.editor.core.CanvasBg) {
         if (b == canvasBg.value) return
         canvasBg.value = b; controller.setCanvasBg(b); persist()
+    }
+    fun setCustomBgImage(uri: android.net.Uri?) {
+        if (uri != null) {
+            val uriStr = uri.toString()
+            customBgUri.value = uriStr
+            val cur = projectBgImages.value.toMutableList()
+            if (!cur.contains(uriStr)) {
+                cur.add(uriStr)
+                projectBgImages.value = cur
+            }
+            setCanvasBg(com.base.editor.core.CanvasBg.IMAGE)
+        } else {
+            customBgUri.value = null
+        }
+    }
+    fun selectBgImage(uriStr: String) {
+        customBgUri.value = uriStr
+        setCanvasBg(com.base.editor.core.CanvasBg.IMAGE)
     }
     fun setBlurRadius(r: Float) {
         val clamped = r.coerceIn(0.2f, 3.0f)
@@ -208,12 +230,25 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
     var onRequestAddAudio: (() -> Unit)? = null
     private var aspect = 9f / 16f
     private var originalAspect = 9f / 16f
+    val mainAspect = MutableStateFlow(9f / 16f)
+    val mainClipTransform = MutableStateFlow(ClipTransform())
     val format = MutableStateFlow(com.base.editor.core.CanvasFormat.ORIGINAL)
     val formatPanelOpen = MutableStateFlow(false)
     private var exportJob: Job? = null
 
+
+    private fun updateMainClipTransform() {
+        val t = playheadMs.value
+        val allClips = controller.state.value.clips
+        val mainClip = allClips.firstOrNull { it.row == 0 && t >= it.startMs && t < it.endMs }
+            ?: allClips.firstOrNull { it.row == 0 }
+        mainClipTransform.value = if (mainClip != null) effectiveTransform(mainClip) else ClipTransform()
+    }
+
     init {
         viewModelScope.launch { controller.appliedVersion.collect { displayAspect.value = videoAspect } }
+        viewModelScope.launch { controller.playheadMs.collect { updateMainClipTransform() } }
+        viewModelScope.launch { controller.state.collect { updateMainClipTransform() } }
         viewModelScope.launch {
             val saved = repo.loadTimeline(projectId)
             controller.load(saved, rebuild = false)       // первая сборка — после определения пропорций холста
@@ -254,7 +289,11 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
     // ───────── проект ─────────
     private suspend fun detectAspect() {
         val first = controller.state.value.clips.filter { it.row == 0 }.minByOrNull { it.startMs } ?: return
-        MediaProbe.displaySize(getApplication(), first.uri, first.type)?.let { (w, h) -> originalAspect = w.toFloat() / h }
+        MediaProbe.displaySize(getApplication(), first.uri, first.type)?.let { (w, h) ->
+            val a = w.toFloat() / h
+            originalAspect = a
+            mainAspect.value = a
+        }
     }
 
     fun setFormat(f: com.base.editor.core.CanvasFormat) {
@@ -301,11 +340,18 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
     override fun scrubTo(ms: Long) {
         val t = snapToKeyframe(ms)
         scrubHaptics(t)
+        scrubPreview(t, exact = false)
         controller.scrubTo(t)
     }
 
     override fun scrubEnd() {
+        scrubPreview(playheadMs.value, exact = true)
         controller.scrubEnd()
+        scrubHideJob?.cancel()
+        scrubHideJob = viewModelScope.launch {
+            controller.awaitSeekSettled(800)
+            hideOverlay()
+        }
     }
 
     /** Кадр под курсором напрямую из файла: плеер на паузе догоняет позицию с задержкой, а этот кадр виден сразу. */
@@ -344,7 +390,7 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
     override fun addOverlay() { overlayPick = true; controller.pause(); onRequestAddMedia?.invoke() }
     private var overlayPick = false
     override fun addAudio() { onRequestAddAudio?.invoke() }
-    override fun addText() { events.value = "Текстовые слои появятся на следующем этапе" }
+    override fun addText() { openNewText() }
 
     /** URI аудиофайла из системного выбора аудио: проба длительности вне главного потока, затем блок на дорожке. */
     fun onAudioPicked(uri: android.net.Uri) {
@@ -356,11 +402,16 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
     }
 
     // ───────── ключевые кадры ─────────
-    /** Клип под курсором = выбранный клип ОСНОВНОЙ дорожки, и курсор внутри него (иначе ромбик недоступен). */
+    /** Клип под курсором = выбранный клип (или клип под курсором по умолчанию, если ничего не выбрано). */
     private fun selectedClipAtPlayhead(): Clip? {
-        val id = selectedId.value ?: return null
         val t = playheadMs.value
-        return clips.value.firstOrNull { it.id == id && (it.row == 0 || it.row == com.base.editor.media.CompositionFactory.OVERLAY_ROW) && it.type != com.base.editor.core.MediaType.AUDIO && t >= it.startMs && t < it.endMs }
+        val id = selectedId.value
+        if (id != null) {
+            val s = clips.value.firstOrNull { it.id == id && (it.row == 0 || it.row == com.base.editor.media.CompositionFactory.OVERLAY_ROW) && it.type != com.base.editor.core.MediaType.AUDIO && t >= it.startMs && t < it.endMs }
+            if (s != null) return s
+        }
+        return clips.value.firstOrNull { it.row == com.base.editor.media.CompositionFactory.OVERLAY_ROW && it.type != com.base.editor.core.MediaType.AUDIO && t >= it.startMs && t < it.endMs }
+            ?: clips.value.firstOrNull { it.row == 0 && it.type != com.base.editor.core.MediaType.AUDIO && t >= it.startMs && t < it.endMs }
     }
 
     /** Есть ли ключ ровно под курсором плеера (для иконки «ромбик с минусом»). */
@@ -373,11 +424,70 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
     fun toggleKeyframe() {
         val clip = selectedClipAtPlayhead() ?: return
         controller.toggleKeyframe(clip.id, playheadMs.value - clip.startMs)
+        keyframesRevision.value++
     }
 
     fun split() {
         val id = selectedId.value ?: return
         if (!controller.split(id)) { events.value = "Поставьте курсор внутрь клипа"; HapticBus.emit(Haptic.ERROR) } else HapticBus.emit(Haptic.SUCCESS)
+    }
+
+    fun duplicateSelected() {
+        val sel = selectedId.value
+        if (sel != null) {
+            val newId = controller.duplicateClip(sel)
+            if (newId != null) {
+                select(newId)
+                HapticBus.emit(Haptic.SUCCESS)
+            }
+            return
+        }
+        val tId = canvasTextId.value
+        if (tId != null) {
+            val newTextId = controller.duplicateText(tId)
+            if (newTextId != null) {
+                canvasTextId.value = newTextId
+                HapticBus.emit(Haptic.SUCCESS)
+            }
+            return
+        }
+    }
+
+    val isReverseBusy = MutableStateFlow(false)
+    fun reverseSelected() {
+        val sel = selectedId.value ?: return
+        val clip = clips.value.firstOrNull { it.id == sel } ?: return
+        if (isReverseBusy.value) return
+        viewModelScope.launch {
+            isReverseBusy.value = true
+            events.value = "Создание реверса..."
+            val reversedUri = if (clip.type == com.base.editor.core.MediaType.AUDIO) {
+                com.base.editor.media.ReverseMediaWorker.reverseAudio(getApplication(), clip.uri)
+            } else {
+                com.base.editor.media.ReverseMediaWorker.reverseVideo(getApplication(), clip.uri, clip.srcInMs, clip.lengthMs)
+            }
+            isReverseBusy.value = false
+            if (reversedUri != null) {
+                controller.setClipUri(clip.id, reversedUri)
+                events.value = "Реверс готов"
+                HapticBus.emit(Haptic.SUCCESS)
+            } else {
+                events.value = "Не удалось создать реверс"
+                HapticBus.emit(Haptic.ERROR)
+            }
+        }
+    }
+
+
+    val audioSourceOpen = MutableStateFlow(false)
+    val voiceRecordOpen = MutableStateFlow(false)
+    fun openAudioSource() { audioSourceOpen.value = true }
+    fun closeAudioSource() { audioSourceOpen.value = false }
+    fun openVoiceRecord() { voiceRecordOpen.value = true }
+    fun closeVoiceRecord() { voiceRecordOpen.value = false }
+    fun addRecordedVoice(filePath: String, durationMs: Long) {
+        controller.addAudio(filePath, durationMs, playheadMs.value)
+        closeVoiceRecord()
     }
 
     fun deleteSelected() { HapticBus.emit(Haptic.SUCCESS); selectedId.value?.let { controller.remove(it); selectedId.value = null } }
@@ -609,10 +719,13 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
         }
     }
 
-    /** Что выделено на холсте: слой текста (черновик имеет приоритет) или клип под курсором. */
+    /** Что выделено на холсте: слой текста или выбранный клип в режиме «Изменить». */
     fun canvasTarget(): CanvasTarget? {
         canvasTextId.value?.let { id -> controller.findText(id)?.let { return CanvasTarget.Text(it, isDraft = false) } }
-        val clip = selectedClipAtPlayhead() ?: return null
+        val selId = selectedId.value ?: return null
+        val clip = clips.value.firstOrNull { it.id == selId && (it.row == 0 || it.row == com.base.editor.media.CompositionFactory.OVERLAY_ROW) && it.type != com.base.editor.core.MediaType.AUDIO } ?: return null
+        val t = playheadMs.value
+        if (t < clip.startMs || t >= clip.endMs) return null
         val live = liveClipTransform.value?.takeIf { it.id == clip.id }?.current
         val crop = controller.cropOf(clip.id)
         val aspect = (clipAspects.value[clip.uri] ?: videoAspect.also { loadClipAspect(clip) }) * (crop.width / crop.height)
@@ -620,10 +733,16 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
     }
 
     /** Текущее положение кадра клипа: интерполяция по ключам на курсоре, иначе статическая трансформация. */
-    private fun effectiveTransform(clip: Clip): ClipTransform =
+    fun effectiveTransform(clip: Clip): ClipTransform =
         controller.state.value.transformAt(clip.id, playheadMs.value - clip.startMs)
 
-    override fun onGestureStart() { controller.beginEdit() }
+    override fun onGestureStart() {
+        hideOverlay()
+        if (selectedId.value == null) {
+            selectedClipAtPlayhead()?.let { selectedId.value = it.id }
+        }
+        controller.beginEdit()
+    }
 
     private var gestureEvents = 0; private var gestureStart = 0L; private var gestureLast = 0L; private var gestureMaxGap = 0L; private var gestureHandlerNs = 0L
 
@@ -636,7 +755,6 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
         liveClipTransform.value = LiveClip(clipId, baked, transform)
         if (clip.row == com.base.editor.media.CompositionFactory.OVERLAY_ROW) {
             controller.setClipTransform(clipId, transform)
-            controller.refreshLive()
         }
         gestureHandlerNs += System.nanoTime() - t0
     }
@@ -647,7 +765,6 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
     override fun onGestureEnd() {
         val live = liveClipTransform.value
         if (live != null) {
-            glClearNext.value++
             android.util.Log.d("BaseGesture", "жест: событий=$gestureEvents за ${gestureLast - gestureStart} мс, макс. пауза=$gestureMaxGap мс")
             val clipId = live.id
             val transform = live.current
@@ -658,6 +775,9 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
             } else {
                 controller.setClipTransform(clipId, transform)
             }
+            if (clip?.row == 0) {
+                mainClipTransform.value = transform
+            }
             controller.commitGestureTransform()
             targetRev.value++
             liveClipTransform.value = null
@@ -666,17 +786,52 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
 
     override fun onTapText(id: String) { openText(id) }
 
-    override fun onTapVideo() {
+    private fun hitTestClip(xRatio: Float, yRatio: Float, t: ClipTransform, clipAspect: Float, canvasAspect: Float): Boolean {
+        val dx = xRatio - 0.5f - t.x
+        val dy = yRatio - 0.5f - t.y
+        val ca = canvasAspect.coerceIn(0.05f, 20f)
+        val a = clipAspect.coerceIn(0.05f, 20f)
+        val (wFit, hFit) = if (a >= ca) 1f to (ca / a) else (a / ca) to 1f
+        val s = if (t.scale > 0.01f) t.scale else 1f
+        val hw = (wFit * s) / 2f + 0.05f
+        val hh = (hFit * s) / 2f + 0.05f
+        val rad = Math.toRadians((-t.rotationDeg).toDouble())
+        val cosR = Math.cos(rad).toFloat()
+        val sinR = Math.sin(rad).toFloat()
+        val dxIso = dx * ca
+        val dyIso = dy
+        val rxIso = dxIso * cosR - dyIso * sinR
+        val ryIso = dxIso * sinR + dyIso * cosR
+        val rx = rxIso / ca
+        val ry = ryIso
+        return kotlin.math.abs(rx) <= hw && kotlin.math.abs(ry) <= hh
+    }
+
+    override fun onTapVideo(xRatio: Float, yRatio: Float) {
         // тап по видео: выделение клипа под курсором; выделенный текст/субтитры — снимаются
         canvasTextId.value = null; selectedCaptionId.value = null; textSub.value = null
         val t = playheadMs.value
-        // Приоритет отдаётся наложениям (они лежат поверх основного видео)
         val overlay = clips.value.firstOrNull { it.row == com.base.editor.media.CompositionFactory.OVERLAY_ROW && t >= it.startMs && t < it.endMs }
         val mainClip = clips.value.firstOrNull { it.row == 0 && t >= it.startMs && t < it.endMs }
-        selectedId.value = when {
-            overlay != null && selectedId.value != overlay.id -> overlay.id
-            mainClip != null && selectedId.value != mainClip.id -> mainClip.id
-            else -> null
+
+        if (overlay != null && xRatio >= 0f && yRatio >= 0f) {
+            val trans = effectiveTransform(overlay)
+            val crop = controller.cropOf(overlay.id)
+            val aspect = (clipAspects.value[overlay.uri] ?: videoAspect.also { loadClipAspect(overlay) }) * (crop.width / crop.height)
+            if (hitTestClip(xRatio, yRatio, trans, aspect, canvasAspect.value)) {
+                selectedId.value = overlay.id
+                return
+            }
+        }
+
+        // Если тап мимо оверлея: снимаем выделение с оверлея, но не переключаем сразу на основной клип
+        if (overlay != null && selectedId.value == overlay.id) {
+            selectedId.value = null
+        } else {
+            selectedId.value = when {
+                mainClip != null && selectedId.value != mainClip.id -> mainClip.id
+                else -> null
+            }
         }
     }
 
@@ -697,9 +852,13 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
     override fun moveText(id: String, startMs: Long) = controller.moveText(id, startMs)
     override fun moveCaption(id: String, startMs: Long) = captions.moveTo(id, startMs)
     override fun trimText(id: String, startMs: Long, endMs: Long) {
-        controller.findText(id)?.let {
-            val s0 = startMs.coerceAtLeast(0L); val e0 = maxOf(endMs, s0 + TextClip.MIN_DURATION_MS)
-            controller.updateText(it.copy(startMs = s0, durationMs = (e0 - s0).coerceAtMost(TextClip.MAX_DURATION_MS)))
+        controller.findText(id)?.let { current ->
+            val others = controller.texts.value.filter { it.id != id }
+            val prevEnd = others.filter { it.startMs < current.startMs }.maxOfOrNull { it.startMs + it.durationMs } ?: 0L
+            val nextStart = others.filter { it.startMs >= current.startMs }.minOfOrNull { it.startMs } ?: Long.MAX_VALUE
+            val s0 = startMs.coerceIn(prevEnd, (current.startMs + current.durationMs - TextClip.MIN_DURATION_MS).coerceAtLeast(prevEnd))
+            val e0 = endMs.coerceIn(s0 + TextClip.MIN_DURATION_MS, nextStart)
+            controller.updateText(current.copy(startMs = s0, durationMs = (e0 - s0).coerceAtMost(TextClip.MAX_DURATION_MS)))
         }
     }
     override fun trimCaption(id: String, startMs: Long, endMs: Long) = captions.trim(id, startMs, endMs)
@@ -737,7 +896,17 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
         if (anim != TextAnimation.NONE) controller.playRange(updated.startMs, minOf(updated.endMs, updated.startMs + TextAnimator.durationMs(updated) + 500))
     }
 
-    fun setTextSub(v: TextSub?) { textSub.value = v }
+    fun setTextSub(v: TextSub?) {
+        if (v == TextSub.FONTS) {
+            textEditorTab.value = TextEditorTab.FONTS
+            openTextInput()
+        } else if (v == TextSub.STYLES) {
+            textEditorTab.value = TextEditorTab.STYLES
+            openTextInput()
+        } else {
+            textSub.value = v
+        }
+    }
     fun openTextInput() { textInputOpen.value = true }
     /** Ввод закончен: если текст пустой — слой убираем (новый слой стартует пустым, чтобы слово «Текст» не приходилось стирать). */
     fun closeTextInput() {
@@ -794,6 +963,7 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
         val text = ttsText.value
         if (text.isBlank()) { events.value = "Введите текст для озвучки"; return }
         if (ttsBusy.value) return
+        ttsSheetOpen.value = false
         ttsBusy.value = true
         val start = playheadMs.value
         ttsJob = viewModelScope.launch {
@@ -802,7 +972,6 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
                 controller.addAudio(android.net.Uri.fromFile(r.file).toString(), r.durationMs, startMs = start)
                 HapticBus.emit(Haptic.SUCCESS)
                 events.value = "Озвучка добавлена на аудиодорожку"
-                ttsSheetOpen.value = false
             } catch (e: kotlinx.coroutines.CancellationException) { throw e
             } catch (e: Exception) {
                 android.util.Log.e("BaseTts", "озвучка", e)
@@ -810,6 +979,12 @@ class EditorViewModel(app: Application, private val handle: SavedStateHandle) : 
                 events.value = "Не удалось озвучить: ${e.javaClass.simpleName}: ${e.message?.take(90)}"
             } finally { ttsBusy.value = false }
         }
+    }
+
+    fun cancelTts() {
+        ttsJob?.cancel()
+        ttsBusy.value = false
+        ttsSheetOpen.value = false
     }
 
     fun importPag(uri: android.net.Uri) {

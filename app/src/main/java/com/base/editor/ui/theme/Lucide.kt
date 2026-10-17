@@ -25,6 +25,7 @@ object Lucide {
     val Captions: ImageVector by lazy { icon("captions", "M5 5h14a2 2 0 0 1 2 2v10a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-10a2 2 0 0 1 2 -2z", "M7 15h4M15 15h2M7 11h2M13 11h4") }
     val CaseSensitive: ImageVector by lazy { icon("case-sensitive", "m2 16 4.039-9.69a.5.5 0 0 1 .923 0L11 16", "M22 9v7", "M3.304 13h6.392", "M15 12.5a3.5 3.5 0 1 0 7 0a3.5 3.5 0 1 0 -7 0") }
     val Check: ImageVector by lazy { icon("check", "M20 6 9 17l-5-5") }
+    val ChevronDown: ImageVector by lazy { icon("chevron-down", "m6 9 6 6 6-6") }
     val ChevronLeft: ImageVector by lazy { icon("chevron-left", "m15 18-6-6 6-6") }
     val ChevronRight: ImageVector by lazy { icon("chevron-right", "m9 18 6-6-6-6") }
     val Crop: ImageVector by lazy { icon("crop", "M6 2v14a2 2 0 0 0 2 2h14", "M18 22V8a2 2 0 0 0-2-2H2") }
@@ -59,4 +60,13 @@ object Lucide {
     val X: ImageVector by lazy { icon("x", "M18 6 6 18", "m6 6 12 12") }
     val RotateCcw: ImageVector by lazy { icon("rotate-ccw", "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8", "M3 3v5h5") }
     val AudioLines: ImageVector by lazy { icon("audio-lines", "M2 10v3", "M6 6v11", "M10 3v18", "M14 8v7", "M18 5v13", "M22 10v3") }
+    val ArrowLeft: ImageVector by lazy { icon("arrow-left", "M19 12H5", "m12 19-7-7 7-7") }
+    val Copy: ImageVector by lazy { icon("copy", "M8 8h12a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2z", "M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2") }
+    val Mic: ImageVector by lazy { icon("mic", "M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z", "M19 10v2a7 7 0 0 1-14 0v-2", "M12 19v4", "M8 23h8") }
+    val HelpCircle: ImageVector by lazy { icon("help-circle", "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z", "M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3", "M12 17h.01") }
+    val ChevronUp: ImageVector by lazy { icon("chevron-up", "m18 15-6-6-6 6") }
+    val PaintBucket: ImageVector by lazy { icon("paint-bucket", "m19 11-8-8-8.6 8.6a2 2 0 0 0 0 2.8l5.2 5.2c.8.8 2 .8 2.8 0L19 11Z", "m5 2 5 5", "M2 13h15", "M22 20a2 2 0 1 1-4 0c0-1.6 1.7-2.4 2-4 .3 1.6 2 2.4 2 4Z") }
+    val Droplet: ImageVector by lazy { icon("droplet", "M12 22a7 7 0 0 0 7-7c0-2-1-3.9-3-5.5s-3.5-4-4-6.5c-.5 2.5-2 4.9-4 6.5C6 11.1 5 13 5 15a7 7 0 0 0 7 7z") }
+    val Ban: ImageVector by lazy { icon("ban", "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z", "m4.93 4.93 14.14 14.14") }
+    val ImagePlus: ImageVector by lazy { icon("image-plus", "M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7", "m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21", "M7 9a2 2 0 1 0 4 0a2 2 0 1 0 -4 0", "M16 5h6", "M19 2v6") }
 }

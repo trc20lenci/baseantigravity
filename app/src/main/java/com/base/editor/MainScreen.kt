@@ -64,12 +64,10 @@ fun MainScreen(onNewVideo: () -> Unit, onEditPhoto: () -> Unit, onOpenProject: (
         },
     ) { pad ->
         Box(Modifier.fillMaxSize().padding(bottom = pad.calculateBottomPadding())) {
-            Crossfade(tab, animationSpec = androidx.compose.animation.core.tween(com.base.editor.ui.theme.BaseMotion.STATE_MS + 40, easing = com.base.editor.ui.theme.BaseMotion.EaseOut), label = "tabs") { t ->
-                when (Tab.entries[t]) {
-                    Tab.Home -> HomeScreen(projects, onNewVideo, onEditPhoto, onOpenProject, onSeeAll = { tab = 1 })
-                    Tab.Projects -> ProjectsScreen(projects, onCreate = onNewVideo, onOpen = onOpenProject, onDelete = vm::delete)
-                    Tab.Me -> ProfileScreen(projects)
-                }
+            when (Tab.entries[tab]) {
+                Tab.Home -> HomeScreen(projects, onNewVideo, onEditPhoto, onOpenProject, onSeeAll = { tab = 1 })
+                Tab.Projects -> ProjectsScreen(projects, onCreate = onNewVideo, onOpen = onOpenProject, onDelete = vm::delete)
+                Tab.Me -> ProfileScreen(projects)
             }
         }
     }

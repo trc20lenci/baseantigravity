@@ -50,9 +50,9 @@ interface CanvasActions {
     fun onClipTransform(clipId: Long, transform: ClipTransform)
     fun onTextTransform(clip: TextClip, isDraft: Boolean)
     fun onGestureEnd()
-    /** Тап по слою текста (id), по пустому месту видео (null). */
+    /** Тап по слою текста (id), по видео с координатами касания (0..1). */
     fun onTapText(id: String)
-    fun onTapVideo()
+    fun onTapVideo(xRatio: Float = -1f, yRatio: Float = -1f)
 }
 
 /**
@@ -84,6 +84,7 @@ fun CanvasTransformOverlay(
     var dragging by remember { mutableStateOf(false) }
     var snapX by remember { mutableStateOf(false) }
     var snapY by remember { mutableStateOf(false) }
+    var snapScale by remember { mutableStateOf(false) }
     val blink by androidx.compose.animation.core.rememberInfiniteTransition(label = "snapBlink").animateFloat(
         0.35f, 1f, androidx.compose.animation.core.infiniteRepeatable(androidx.compose.animation.core.tween(380), androidx.compose.animation.core.RepeatMode.Reverse), label = "blink",
     )
@@ -121,14 +122,17 @@ fun CanvasTransformOverlay(
                                 is CanvasTarget.Clip -> {
                                     var nx = b.transform.x + accPan.x / w; var ny = b.transform.y + accPan.y / h
                                     val rawRot = b.transform.rotationDeg + accRot
+                                    val rawScale = b.transform.scale * accZoom
                                     val hx = if (snapX) abs(nx) < freeX else abs(nx) < catchX
                                     val hy = if (snapY) abs(ny) < freeY else abs(ny) < catchY
                                     val hr = if (rotSnapped) angleOff(rawRot) < ROT_RELEASE else angleOff(rawRot) < ROT_CATCH
-                                    if ((hx && !snapX) || (hy && !snapY) || (hr && !rotSnapped)) view.haptic(Haptic.SNAP)
-                                    snapX = hx; snapY = hy; rotSnapped = hr
+                                    val hs = if (snapScale) abs(rawScale - 1.0f) < 0.08f else abs(rawScale - 1.0f) < 0.04f
+                                    if ((hx && !snapX) || (hy && !snapY) || (hr && !rotSnapped) || (hs && !snapScale)) view.haptic(Haptic.SNAP)
+                                    snapX = hx; snapY = hy; rotSnapped = hr; snapScale = hs
                                     if (hx) nx = 0f; if (hy) ny = 0f
                                     val rot = if (hr) angleSnap(rawRot) else rawRot
-                                    lastClip = b.transform.copy(x = nx, y = ny, scale = b.transform.scale * accZoom, rotationDeg = rot).sane()
+                                    val finalScale = if (hs) 1.0f else rawScale
+                                    lastClip = b.transform.copy(x = nx, y = ny, scale = finalScale, rotationDeg = rot).sane()
                                     act.onClipTransform(b.id, lastClip!!)
                                 }
                                 is CanvasTarget.Text -> {
@@ -150,24 +154,36 @@ fun CanvasTransformOverlay(
                     } while (event.changes.any { it.pressed })
 
                     if (transforming) {
-                        // отпустили: если элемент почти по центру / поворот почти ровный — ставим в точности ровно
+                        // отпустили: если элемент почти по центру / поворот почти ровный / масштаб почти 1.0 — ставим в точности ровно
                         val b = base; val w = size.width.toFloat(); val h = size.height.toFloat()
                         val ex = SETTLE_DP.dp.toPx() / w; val ey = SETTLE_DP.dp.toPx() / h
                         fun settleRot(r: Float): Float { val k = Math.round(r / 90f) * 90f; return if (abs(r - k) < 2.5f) k else r }
                         if (b is CanvasTarget.Clip) lastClip?.let { c ->
-                            val f = c.copy(x = if (abs(c.x) < ex) 0f else c.x, y = if (abs(c.y) < ey) 0f else c.y, rotationDeg = settleRot(c.rotationDeg))
+                            val s = if (abs(c.scale - 1.0f) < 0.05f) 1.0f else c.scale
+                            val f = c.copy(
+                                x = if (abs(c.x) < ex) 0f else c.x,
+                                y = if (abs(c.y) < ey) 0f else c.y,
+                                scale = s,
+                                rotationDeg = settleRot(c.rotationDeg)
+                            )
                             if (f != c) { act.onClipTransform(b.id, f); view.haptic(Haptic.SNAP) }
                         }
                         if (b is CanvasTarget.Text) lastText?.let { c ->
                             val f = c.copy(positionX = if (abs(c.positionX - 0.5f) < ex) 0.5f else c.positionX, positionY = if (abs(c.positionY - 0.5f) < ey) 0.5f else c.positionY, rotationDeg = settleRot(c.rotationDeg))
                             if (f != c) { act.onTextTransform(f, (b as CanvasTarget.Text).isDraft); view.haptic(Haptic.SNAP) }
                         }
-                        act.onGestureEnd(); dragging = false; snapX = false; snapY = false
+                        act.onGestureEnd(); dragging = false; snapX = false; snapY = false; snapScale = false
                     }
                     else {
                         // тап: сверху вниз ищем текстовый слой под пальцем, иначе — видео
                         val hit = hitText(measurer, currentTexts, down.position, Size(size.width.toFloat(), size.height.toFloat()), this)
-                        if (hit != null) act.onTapText(hit) else act.onTapVideo()
+                        if (hit != null) {
+                            act.onTapText(hit)
+                        } else {
+                            val xr = if (size.width > 0) down.position.x / size.width.toFloat() else -1f
+                            val yr = if (size.height > 0) down.position.y / size.height.toFloat() else -1f
+                            act.onTapVideo(xr, yr)
+                        }
                     }
                 }
             },
@@ -180,6 +196,19 @@ fun CanvasTransformOverlay(
                     strokeWidth = if (snapX) 2.dp.toPx() else 1.dp.toPx(), pathEffect = if (snapX) null else dash)
                 drawLine(on.copy(alpha = if (snapY) blink else 0.28f), Offset(0f, size.height / 2), Offset(size.width, size.height / 2),
                     strokeWidth = if (snapY) 2.dp.toPx() else 1.dp.toPx(), pathEffect = if (snapY) null else dash)
+
+                // Обозначение идеального кадра по увеличению (1.0x): подсвечиваем идеальные границы вписанного кадра
+                if (snapScale) {
+                    val clipAspect = (target as? CanvasTarget.Clip)?.aspect ?: videoAspect
+                    val (idealW, idealH) = fitSize(size.width, size.height, clipAspect)
+                    val idealTl = Offset((size.width - idealW) / 2f, (size.height - idealH) / 2f)
+                    drawRect(
+                        color = on.copy(alpha = blink),
+                        topLeft = idealTl,
+                        size = Size(idealW, idealH),
+                        style = Stroke(width = 2.dp.toPx(), pathEffect = dash)
+                    )
+                }
             }
             val t = target ?: return@Canvas
             when (t) {

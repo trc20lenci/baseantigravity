@@ -48,7 +48,7 @@ private class TransitionProgram(
         onFallback("Переход «${spec.label}» не поддерживается этим устройством")
         null
     }
-    private val quad = GlUtil.createBuffer(GlUtil.getNormalizedCoordinateBounds())
+    private val vbo = createVbo(GlUtil.getNormalizedCoordinateBounds())
     private val locProgress = program?.getUniformLocation("progress") ?: -1
     private val locRatio = program?.getUniformLocation("ratio") ?: -1
     private val locFrom = program?.getUniformLocation("from") ?: -1
@@ -72,10 +72,8 @@ private class TransitionProgram(
             val p = program!!
             val progress = (elapsed.toFloat() / durationUs).coerceIn(0f, 1f)
             p.use()
-            // Атрибут (location 0 в вершинном шейдере) привязываем вручную: bindAttributesAndUniforms()
-            // требует задать все sampler-uniform'ы, а часть из них компилятор может вырезать.
-            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
-            GLES20.glVertexAttribPointer(0, GlUtil.HOMOGENEOUS_COORDINATE_VECTOR_SIZE, GLES20.GL_FLOAT, false, 0, quad)
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vbo)
+            GLES20.glVertexAttribPointer(0, GlUtil.HOMOGENEOUS_COORDINATE_VECTOR_SIZE, GLES20.GL_FLOAT, false, 0, 0)
             GLES20.glEnableVertexAttribArray(0)
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, bridge.textureId)
             GLES20.glActiveTexture(GLES20.GL_TEXTURE1); GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, inputTexId)
@@ -85,7 +83,10 @@ private class TransitionProgram(
             if (locProgress >= 0) GLES20.glUniform1f(locProgress, progress)
             if (locRatio >= 0) GLES20.glUniform1f(locRatio, w.toFloat() / h)
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            GLES20.glDisableVertexAttribArray(0)
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE1); GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0); GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0)
             GlUtil.checkGlError()
         } catch (e: GlUtil.GlException) {
             throw VideoFrameProcessingException(e)
@@ -94,8 +95,32 @@ private class TransitionProgram(
 
     override fun release() {
         super.release()
-        runCatching { blit.release(); program?.delete(); bridge.release() }   // переход — последний потребитель моста
+        runCatching {
+            blit.release()
+            program?.delete()
+            deleteVbo(vbo)
+            bridge.release()
+        }   // переход — последний потребитель моста
     }
 
-    private companion object { const val TAG = "BaseTransition" }
+    private companion object {
+        const val TAG = "BaseTransition"
+
+        fun createVbo(data: FloatArray): Int {
+            val b = GlUtil.createBuffer(data)
+            val ids = IntArray(1)
+            GLES20.glGenBuffers(1, ids, 0)
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, ids[0])
+            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, data.size * 4, b, GLES20.GL_STATIC_DRAW)
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
+            return ids[0]
+        }
+
+        fun deleteVbo(id: Int) {
+            if (id != 0) {
+                val ids = intArrayOf(id)
+                GLES20.glDeleteBuffers(1, ids, 0)
+            }
+        }
+    }
 }

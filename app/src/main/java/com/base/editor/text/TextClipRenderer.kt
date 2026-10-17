@@ -87,17 +87,29 @@ object TextClipRenderer {
                 if (a.scale != 1f) scale(a.scale, a.scale, pivot)
                 rotate(clip.rotationDeg, pivot)
             }) {
-                if (clip.hasBackground) drawRoundRect(Color(clip.backgroundColor).al(), Offset(l.left, l.top), Size(l.boxW, l.boxH), CornerRadius(l.fontPx * 0.3f))
+                if (clip.hasBackground) {
+                    val cr = CornerRadius(clip.bgCornerRadius * (l.fontPx / 20f).coerceAtLeast(0.5f))
+                    drawRoundRect(Color(clip.backgroundColor).al(), Offset(l.left, l.top), Size(l.boxW, l.boxH), cr)
+                }
                 val at = Offset(l.left + l.padX, l.top + l.padY)
-                val shadow = if (clip.shadowColor != 0L)
-                    Shadow(Color(clip.shadowColor).al(), Offset(0f, clip.shadowDy * l.fontPx), blurRadius = clip.shadowBlur * l.fontPx)
-                else null
-                if (clip.strokeColor != 0L && clip.strokeWidth > 0f) {
-                    // контур отдельным проходом под заливкой: толстая обводка со скруглёнными стыками, без размытия
-                    drawText(l.layout, color = Color(clip.strokeColor).al(), topLeft = at, shadow = shadow,
-                        drawStyle = Stroke(width = clip.strokeWidth * l.fontPx * 2f, join = StrokeJoin.Round, cap = StrokeCap.Round))
-                    drawText(l.layout, color = Color(clip.textColor).al(), topLeft = at)
-                } else drawText(l.layout, color = Color(clip.textColor).al(), topLeft = at, shadow = shadow)
+                val shadow = when {
+                    clip.glowColor != 0L -> Shadow(Color(clip.glowColor).al(), Offset.Zero, blurRadius = max(6f, clip.glowRadius * l.fontPx))
+                    clip.shadowColor != 0L -> Shadow(Color(clip.shadowColor).al(), Offset(0f, clip.shadowDy * l.fontPx), blurRadius = max(2f, clip.shadowBlur * l.fontPx))
+                    else -> null
+                }
+                if (clip.strokeColor != 0L && clip.strokeWidth > 0.001f) {
+                    val strokePx = (clip.strokeWidth * l.fontPx * 0.6f).coerceIn(1.5f, 24.dp.toPx())
+                    drawText(
+                        l.layout,
+                        color = Color(clip.strokeColor).al(),
+                        topLeft = at,
+                        shadow = shadow,
+                        drawStyle = Stroke(width = strokePx, join = StrokeJoin.Round, cap = StrokeCap.Round)
+                    )
+                    drawText(l.layout, color = Color(clip.textColor).al(), topLeft = at, drawStyle = androidx.compose.ui.graphics.drawscope.Fill)
+                } else {
+                    drawText(l.layout, color = Color(clip.textColor).al(), topLeft = at, shadow = shadow, drawStyle = androidx.compose.ui.graphics.drawscope.Fill)
+                }
             }
         } catch (_: Exception) {
             // zero-crash

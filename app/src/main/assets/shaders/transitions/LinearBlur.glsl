@@ -1,7 +1,7 @@
 // Author: gre
 // License: MIT
 const float intensity = 0.1;
-const int passes = 6;
+const int passes = 3;
 
 vec4 transition(vec2 uv) {
     vec4 c1 = vec4(0.0);

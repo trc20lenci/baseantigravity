@@ -7,19 +7,21 @@ import kotlin.math.sin
 
 /** Готовые стили текста (карусель в нижней панели). Применяются поверх шрифта/позиции слоя. */
 object TextStyles {
-    class Preset(val id: String, val label: String, val apply: (TextClip) -> TextClip)
+    class Preset(val id: String, val label: String, val fontId: String = "MONTSERRAT", val apply: (TextClip) -> TextClip)
 
     val all: List<Preset> = listOf(
-        Preset("plain", "Обычный") { it.copy(styleId = "plain", textColor = 0xFFFFFFFF, backgroundColor = 0, strokeColor = 0, strokeWidth = 0f, shadowColor = 0x66000000, shadowBlur = 0f, shadowDy = 0.06f) },
-        // Reels / TikTok: белый текст на аккуратной полупрозрачной чёрной скруглённой плашке
-        Preset("reels", "Reels") { it.copy(styleId = "reels", textColor = 0xFFFFFFFF, backgroundColor = 0x99000000, strokeColor = 0, strokeWidth = 0f, shadowColor = 0, shadowBlur = 0f, shadowDy = 0f) },
-        // Blogger / YouTube: жёлтый жирный + чёрный контур + лёгкая тень
-        Preset("blogger", "Blogger") { it.copy(styleId = "blogger", textColor = 0xFFFFE600, backgroundColor = 0, strokeColor = 0xFF000000, strokeWidth = 0.09f, shadowColor = 0x66000000, shadowBlur = 0f, shadowDy = 0.07f, fontId = "MONTSERRAT_BLACK") },
-        // Neon: яркий циан + свечение (мягкая тень с радиусом)
-        Preset("neon", "Neon") { it.copy(styleId = "neon", textColor = 0xFF7DF9FF, backgroundColor = 0, strokeColor = 0, strokeWidth = 0f, shadowColor = 0xFF00E5FF, shadowBlur = 0.35f, shadowDy = 0f) },
-        Preset("neon_pink", "Neon pink") { it.copy(styleId = "neon_pink", textColor = 0xFFFF9AF5, backgroundColor = 0, strokeColor = 0, strokeWidth = 0f, shadowColor = 0xFFFF2BD6, shadowBlur = 0.35f, shadowDy = 0f) },
-        // Cinema: минималистичный чистый белый с глубокой тенью
-        Preset("cinema", "Cinema") { it.copy(styleId = "cinema", textColor = 0xFFFFFFFF, backgroundColor = 0, strokeColor = 0, strokeWidth = 0f, shadowColor = 0xB3000000, shadowBlur = 0.22f, shadowDy = 0.1f, fontId = "INTER") },
+        Preset("plain", "Обычный", "MONTSERRAT") { it.copy(styleId = "plain", fontId = "MONTSERRAT", textColor = 0xFFFFFFFF, backgroundColor = 0, strokeColor = 0, strokeWidth = 0f, shadowColor = 0, shadowBlur = 0f, shadowDy = 0f, glowColor = 0, glowRadius = 0f) },
+        Preset("white_stroke", "Контур", "MONTSERRAT") { it.copy(styleId = "white_stroke", fontId = "MONTSERRAT", textColor = 0xFFFFFFFF, backgroundColor = 0, strokeColor = 0xFF000000, strokeWidth = 0.05f, shadowColor = 0, shadowBlur = 0f, shadowDy = 0f, glowColor = 0, glowRadius = 0f) },
+        Preset("neon_yellow", "Неон Жёлтый", "MONTSERRAT") { it.copy(styleId = "neon_yellow", fontId = "MONTSERRAT", textColor = 0xFFFFE600, backgroundColor = 0, strokeColor = 0xFF000000, strokeWidth = 0.05f, shadowColor = 0, shadowBlur = 0f, shadowDy = 0f, glowColor = 0xFFFFE600, glowRadius = 0.20f) },
+        Preset("neon_green", "Неон Зелёный", "MONTSERRAT") { it.copy(styleId = "neon_green", fontId = "MONTSERRAT", textColor = 0xFF00FF66, backgroundColor = 0, strokeColor = 0xFF000000, strokeWidth = 0.05f, shadowColor = 0, shadowBlur = 0f, shadowDy = 0f, glowColor = 0xFF00FF66, glowRadius = 0.20f) },
+        Preset("fire_red", "Огненный", "RUSSO") { it.copy(styleId = "fire_red", fontId = "RUSSO", textColor = 0xFFFF2D55, backgroundColor = 0, strokeColor = 0xFF000000, strokeWidth = 0.05f, shadowColor = 0xFFFF2D55, shadowBlur = 0.15f, shadowDy = 0f, glowColor = 0xFFFF2D55, glowRadius = 0.20f) },
+        Preset("karaoke_cyan", "Караоке Циан", "MONTSERRAT") { it.copy(styleId = "karaoke_cyan", fontId = "MONTSERRAT", textColor = 0xFF00E5FF, backgroundColor = 0, strokeColor = 0xFF000000, strokeWidth = 0.05f, shadowColor = 0, shadowBlur = 0f, shadowDy = 0f, glowColor = 0, glowRadius = 0f) },
+        Preset("gold_glow", "Золотой", "OSWALD") { it.copy(styleId = "gold_glow", fontId = "OSWALD", textColor = 0xFFFFB300, backgroundColor = 0, strokeColor = 0xFF1F1F1F, strokeWidth = 0.05f, shadowColor = 0, shadowBlur = 0f, shadowDy = 0f, glowColor = 0xFFFFB300, glowRadius = 0.18f) },
+        Preset("purple_vibe", "Фиолетовый", "RUBIK") { it.copy(styleId = "purple_vibe", fontId = "RUBIK", textColor = 0xFFB388FF, backgroundColor = 0, strokeColor = 0xFF16032B, strokeWidth = 0.05f, shadowColor = 0, shadowBlur = 0f, shadowDy = 0f, glowColor = 0, glowRadius = 0f) },
+        Preset("badge_black", "Тёмная плашка", "MONTSERRAT") { it.copy(styleId = "badge_black", fontId = "MONTSERRAT", textColor = 0xFFFFFFFF, backgroundColor = 0xCC000000, strokeColor = 0, strokeWidth = 0f, shadowColor = 0, shadowBlur = 0f, shadowDy = 0f, glowColor = 0, glowRadius = 0f, bgCornerRadius = 12f) },
+        Preset("badge_yellow", "Жёлтая плашка", "MONTSERRAT") { it.copy(styleId = "badge_yellow", fontId = "MONTSERRAT", textColor = 0xFF000000, backgroundColor = 0xFFFFE600, strokeColor = 0, strokeWidth = 0f, shadowColor = 0, shadowBlur = 0f, shadowDy = 0f, glowColor = 0, glowRadius = 0f, bgCornerRadius = 12f) },
+        Preset("black_stroke", "Белый контур", "MONTSERRAT") { it.copy(styleId = "black_stroke", fontId = "MONTSERRAT", textColor = 0xFF000000, backgroundColor = 0, strokeColor = 0xFFFFFFFF, strokeWidth = 0.05f, shadowColor = 0, shadowBlur = 0f, shadowDy = 0f, glowColor = 0, glowRadius = 0f) },
+        Preset("white_shadow", "Тень", "MONTSERRAT") { it.copy(styleId = "white_shadow", fontId = "MONTSERRAT", textColor = 0xFFFFFFFF, backgroundColor = 0, strokeColor = 0, strokeWidth = 0f, shadowColor = 0xB3000000, shadowBlur = 0.20f, shadowDy = 0.08f, glowColor = 0, glowRadius = 0f) },
     )
 
     fun byId(id: String) = all.firstOrNull { it.id == id }

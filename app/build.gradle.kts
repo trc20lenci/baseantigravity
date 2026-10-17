@@ -97,6 +97,7 @@ dependencies {
     implementation("org.apache.commons:commons-compress:1.26.2")
     implementation("net.java.dev.jna:jna:5.14.0@aar")
     implementation(libs.libpag)
+    implementation("com.quickbirdstudios:opencv:4.5.3.0")
 
     testImplementation(libs.junit)
     testImplementation(libs.json)

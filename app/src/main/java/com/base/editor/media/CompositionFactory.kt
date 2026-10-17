@@ -83,7 +83,9 @@ class CompositionFactory(private val context: Context, private val catalog: Tran
         val inbound = req.state.transitions.associateBy { it.rightId }
         val outbound = req.state.transitions.associateBy { it.leftId }
 
-        val seq = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_AUDIO, C.TRACK_TYPE_VIDEO))
+        val hasAudioInMain = !req.removeAudio && main.any { it.type == MediaType.VIDEO }
+        val trackTypes = if (hasAudioInMain) setOf(C.TRACK_TYPE_AUDIO, C.TRACK_TYPE_VIDEO) else setOf(C.TRACK_TYPE_VIDEO)
+        val seq = EditedMediaItemSequence.Builder(trackTypes)
         var cursorMs = 0L
         for (clip in main) {
             if (clip.startMs > cursorMs) seq.addGap((clip.startMs - cursorMs) * 1000)
@@ -102,23 +104,31 @@ class CompositionFactory(private val context: Context, private val catalog: Tran
             }
             val live = req.liveTransforms
             val keys = req.state.keyframes[clip.id].orEmpty()
-            if (req.canvasBg != com.base.editor.core.CanvasBg.BLACK && clip.type != MediaType.AUDIO) {
-                // фон не чёрный: вписывание, положение кадра и фон полей — одним эффектом (фон не двигается вместе с кадром)
-                val id = clip.id; val startMs = clip.startMs; val staticT = req.state.transforms[id] ?: ClipTransform()
+            if (clip.type != MediaType.AUDIO) {
+                val id = clip.id
+                val startMs = clip.startMs
+                val isPreview = live != null
+                val isImageBg = req.canvasBg == com.base.editor.core.CanvasBg.IMAGE
+                val bgArgb = if (req.canvasBg == com.base.editor.core.CanvasBg.BLUR) null else req.canvasBg.argb
+                val staticT = req.state.transforms[clip.id] ?: ClipTransform()
                 val transformAt: (Long) -> ClipTransform = when {
-                    live != null -> { us -> live(id, (us / 1000 - startMs).coerceAtLeast(0L)) }
+                    live != null -> { us -> live(id, us) }
                     keys.isNotEmpty() -> { us -> com.base.editor.domain.KeyframeTrack.at(keys, (us / 1000 - startMs).coerceAtLeast(0L)) }
                     else -> { _ -> staticT }
                 }
-                effects += com.base.editor.media.gl.BackgroundFitEffect(req.canvas.width, req.canvas.height, req.canvasBg.argb, req.blurRadius) { us -> transformMatrix(transformAt(us), req.canvas) }
-            } else {
-                effects += (Presentation.createForWidthAndHeight(req.canvas.width, req.canvas.height, Presentation.LAYOUT_SCALE_TO_FIT))
-                if (live != null) {
-                    val startMs = clip.startMs; val id = clip.id
-                    effects += MatrixTransformation { us -> transformMatrix(live(id, (us / 1000 - startMs).coerceAtLeast(0L)), req.canvas) }
+                effects += com.base.editor.media.gl.BackgroundFitEffect(
+                    canvasW = req.canvas.width,
+                    canvasH = req.canvas.height,
+                    bgArgb = bgArgb,
+                    blurRadius = req.blurRadius,
+                    transparentBg = isPreview || isImageBg,
+                ) { us ->
+                    if (isPreview && clip.row == 0) {
+                        transformMatrix(ClipTransform(), req.canvas)
+                    } else {
+                        transformMatrix(transformAt(us), req.canvas)
+                    }
                 }
-                else if (keys.isNotEmpty()) effects += keyframeTransformEffect(keys, clip.startMs, req.canvas)
-                else req.state.transforms[clip.id]?.takeIf { !it.isIdentity }?.let { effects += clipTransformEffect(it, req.canvas) }
             }
             if (!req.safeMode) {
                 inbound[clip.id]?.let { t ->
@@ -127,40 +137,27 @@ class CompositionFactory(private val context: Context, private val catalog: Tran
                     } ?: Log.w(TAG, "переход ${t.shaderId} не найден в каталоге")
                 }
                 // захват хвоста — после перехода, чтобы в мост попал финальный кадр клипа
-                outbound[clip.id]?.let { effects += TailCaptureEffect(bridges.getOrPut(clip.id) { TransitionBridge() }) }
+                outbound[clip.id]?.let { effects += TailCaptureEffect(bridges.getOrPut(clip.id) { TransitionBridge() }, clip.lengthMs * 1000L) }
             }
             seq.addItem(editedItem(clip, effects, req.removeAudio, req.fps ?: FRAME_RATE))
             cursorMs = clip.endMs
         }
 
-        // наложения (фото/видео поверх основного): отдельная видео-последовательность на всю длину проекта.
-        // Зазоры заполняются прозрачным изображением, гарантируя непрерывный поток кадров в VideoCompositor
-        // и исключая deadlock/зависание декодера Media3 в STATE_BUFFERING.
-        val overlayClips = req.state.clips.filter { it.row == OVERLAY_ROW && it.type != MediaType.AUDIO }.sortedBy { it.startMs }
         val fpsUsed = req.fps ?: FRAME_RATE
-        val overlaySeq = if (overlayClips.isEmpty()) null else {
-            val totalMs = maxOf(main.last().endMs, overlayClips.last().endMs)
-            val o = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_VIDEO))
-            var cur = 0L
-            for (c in overlayClips) {
-                if (c.startMs > cur) o.addItem(transparentFiller(c.startMs - cur, fpsUsed))
-                val fx = mutableListOf<Effect>()
-                if (!req.safeMode && (req.state.chromas.containsKey(c.id) || req.state.bgs.containsKey(c.id))) {
-                    val id = c.id
-                    val maskReader = if (req.state.bgs.containsKey(id)) com.base.editor.media.MaskStore(context).reader(c.uri) else null
-                    val provider = req.liveFx ?: { _ -> com.base.editor.media.gl.FxParams(req.state.chromas[id], req.state.bgs[id]) }
-                    fx += com.base.editor.media.gl.ClipFxEffect({ provider(id) }, maskReader, c.startMs, c.srcInMs, c.speed, transparent = true)
-                }
-                req.state.crops[c.id]?.takeIf { !it.isFull }?.let { cr -> fx += Crop(-1f + 2f * cr.left, -1f + 2f * cr.right, 1f - 2f * cr.bottom, 1f - 2f * cr.top) }
-                fx += com.base.editor.media.gl.FitAlphaEffect(req.canvas.width, req.canvas.height)
-                o.addItem(editedItem(c, fx, removeAudio = true, fps = fpsUsed))
-                cur = c.endMs
+        val totalProjectMs = req.state.totalMs
+        if (cursorMs < totalProjectMs) {
+            val padMs = totalProjectMs - cursorMs
+            if (padMs > 0) {
+                seq.addGap(padMs * 1000L)
+                cursorMs = totalProjectMs
             }
-            if (totalMs > cur) o.addItem(transparentFiller(totalMs - cur, fpsUsed))
-            o.build()
         }
 
-        // музыка: параллельная последовательность только со звуком (видео у неё снято)
+        // наложения (фото/видео поверх основного): в превью рендерятся аппаратно на Compose/GL слое,
+        // исключая тяжелый MultipleInputVideoGraph и падения DefaultVideoCompositor.isInputEnded при перемотке.
+        val overlayClips = req.state.clips.filter { it.row == OVERLAY_ROW && it.type != MediaType.AUDIO }.sortedBy { it.startMs }
+
+        // музыка: параллельная последовательность только со звуком
         val music = req.state.clips.filter { it.row != 0 && it.type == MediaType.AUDIO }.sortedBy { it.startMs }
         val audioSeq = if (music.isEmpty()) null else {
             val a = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_AUDIO))
@@ -170,17 +167,34 @@ class CompositionFactory(private val context: Context, private val catalog: Tran
                 a.addItem(editedItem(c, emptyList(), removeAudio = false, fps = fpsUsed))
                 cur = c.endMs
             }
+            if (cur < totalProjectMs) {
+                a.addGap((totalProjectMs - cur) * 1000L)
+            }
             a.build()
         }
-        // порядок: основная (вход 0, первичный тактовый генератор) → наложения (вход 1, поверх основной) → музыка
-        val builder = Composition.Builder(listOfNotNull(seq.build(), overlaySeq, audioSeq))
-        if (overlaySeq != null) {
-            val live = req.liveTransforms
-            val settings = OverlayCompositorSettings(req.canvas, overlayClips) { id, ms -> live?.invoke(id, ms) ?: req.state.transformAt(id, ms) }
-            builder.setVideoCompositorSettings(settings)
+
+        // звук видео-наложений (экспорт)
+        val overlayVideos = req.state.clips.filter { it.row == OVERLAY_ROW && it.type == MediaType.VIDEO }.sortedBy { it.startMs }
+        val overlayAudioSeq = if (req.liveTransforms != null || overlayVideos.isEmpty()) null else {
+            val a = EditedMediaItemSequence.Builder(setOf(C.TRACK_TYPE_AUDIO))
+            var cur = 0L
+            for (c in overlayVideos) {
+                if (c.startMs > cur) a.addGap((c.startMs - cur) * 1000)
+                a.addItem(editedItem(c, emptyList(), removeAudio = false, fps = fpsUsed))
+                cur = c.endMs
+            }
+            if (cur < totalProjectMs) {
+                a.addGap((totalProjectMs - cur) * 1000L)
+            }
+            a.build()
         }
+        val builder = Composition.Builder(listOfNotNull(seq.build(), audioSeq, overlayAudioSeq))
+
         // эффект уровня композиции: время кадров — время всего проекта, слои совпадают с таймлайном
         val overlays = buildList<androidx.media3.effect.TextureOverlay> {
+            if (req.liveTransforms == null && overlayClips.isNotEmpty()) {
+                add(OverlayExportOverlay(context, overlayClips, req.canvas) { id, ms -> req.state.transformAt(id, ms) })
+            }
             req.captions?.takeIf { it.items.isNotEmpty() }?.let { add(CaptionBitmapOverlay(context, it, req.canvas)) }
             val plain = req.texts.filter { it.pagTemplate == null }
             val animated = req.texts.filter { it.pagTemplate != null }
@@ -244,7 +258,7 @@ class CompositionFactory(private val context: Context, private val catalog: Tran
         val edited: EditedMediaItem.Builder
         if (c.type == MediaType.IMAGE) {
             item.setImageDurationMs(c.lengthMs)
-            edited = EditedMediaItem.Builder(item.build()).setDurationUs(c.lengthMs * 1000).setFrameRate(fps)
+            edited = EditedMediaItem.Builder(item.build()).setRemoveAudio(true).setDurationUs(c.lengthMs * 1000).setFrameRate(fps)
         } else {
             // отрезок ИСХОДНИКА = длина на таймлайне × скорость (при 2× клип в 10 с занимает 20 с исходника)
             val srcSpan = c.srcSpanMs
@@ -254,10 +268,8 @@ class CompositionFactory(private val context: Context, private val catalog: Tran
                     .setEndPositionMs(c.srcInMs + srcSpan)
                     .build(),
             )
-            // CompositionPlayer не читает длительность из файла: ему нужна ПОЛНАЯ длительность исходника
-            // заранее (из неё он сам вычитает обрезку). Без этого — IllegalStateException в setComposition.
-            val sourceMs = max(c.srcDurMs, c.srcInMs + srcSpan)
-            edited = EditedMediaItem.Builder(item.build()).setDurationUs(sourceMs * 1000).setFrameRate(fps)
+            // Длительность обрезанного отрезка на шкале Media3: ровно srcSpan мс (до применения speed)
+            edited = EditedMediaItem.Builder(item.build()).setDurationUs(srcSpan * 1000L).setFrameRate(fps)
             // скорость: SpeedProvider меняет темп и видео, и звука; звук растягивается с сохранением тона (Sonic)
             if (abs(c.speed - 1f) > 1e-3f) edited.setSpeed(ConstantSpeed(c.speed))
         }
@@ -265,7 +277,7 @@ class CompositionFactory(private val context: Context, private val catalog: Tran
         val audioFx: List<androidx.media3.common.audio.AudioProcessor> =
             if (abs(c.volume - 1f) > 1e-3f) listOf(volumeProcessor(c.volume)) else emptyList()
         return edited.setEffects(Effects(audioFx, videoEffects))
-            .setRemoveAudio(removeAudio)
+            .setRemoveAudio(if (c.type == MediaType.IMAGE) true else removeAudio)
             .setRemoveVideo(c.type == MediaType.AUDIO)      // музыка идёт отдельной звуковой последовательностью
             .build()
     }

@@ -18,8 +18,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
-import com.base.editor.ui.theme.staggeredEnter
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -110,7 +108,7 @@ fun ProjectsScreen(projects: List<ProjectMeta>, onCreate: () -> Unit, onOpen: (S
                     Text(if (projects.isEmpty()) "Проектов пока нет. Нажмите «Создать», чтобы выбрать видео или фото." else "Ничего не найдено.", color = BaseColors.Muted, fontSize = 13.sp)
                 }
             } else LazyColumn(contentPadding = PaddingValues(start = 20.dp, end = 12.dp, bottom = 100.dp)) {
-                itemsIndexed(shown, key = { _, p -> p.id }) { i, p -> Box(Modifier.staggeredEnter(i)) { ProjectRow(p, onOpen = { onOpen(p.id) }, onDelete = { onDelete(p.id) }) } }
+                items(shown, key = { it.id }) { p -> ProjectRow(p, onOpen = { onOpen(p.id) }, onDelete = { onDelete(p.id) }) }
             }
         }
         Row(
@@ -151,13 +149,29 @@ private fun ProjectRow(p: ProjectMeta, onOpen: () -> Unit, onDelete: () -> Unit)
     }
 }
 
-/** Обложка проекта (JPEG из filesDir) либо серая заглушка. */
+object ProjectThumbCache {
+    private val cache = androidx.collection.LruCache<String, androidx.compose.ui.graphics.ImageBitmap>(64)
+    fun get(key: String): androidx.compose.ui.graphics.ImageBitmap? = cache.get(key)
+    fun put(key: String, bmp: androidx.compose.ui.graphics.ImageBitmap) { cache.put(key, bmp) }
+}
+
+/** Обложка проекта (JPEG из filesDir) с кэшированием в памяти: мгновенная отрисовка без чёрного мигания. */
 @Composable
 fun ProjectThumb(p: ProjectMeta, modifier: Modifier) {
-    val bmp by produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, p.thumbPath, p.modifiedAt) {
-        value = p.thumbPath?.let { path -> withContext(Dispatchers.IO) { BitmapFactory.decodeFile(path)?.asImageBitmap() } }
+    val key = "${p.thumbPath}_${p.modifiedAt}"
+    val cached = remember(key) { p.thumbPath?.let { ProjectThumbCache.get(key) } }
+    val bmp by produceState(initialValue = cached, key1 = key) {
+        if (value == null && p.thumbPath != null) {
+            val loaded = withContext(Dispatchers.IO) {
+                BitmapFactory.decodeFile(p.thumbPath)?.asImageBitmap()
+            }
+            if (loaded != null) {
+                ProjectThumbCache.put(key, loaded)
+                value = loaded
+            }
+        }
     }
-    Box(modifier.background(Color(0xFF1B1C20))) {
+    Box(modifier.background(Color(0xFF23242A))) {
         bmp?.let { Image(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
     }
 }

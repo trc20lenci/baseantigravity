@@ -148,6 +148,7 @@ class TimelineController(
     /** Растёт каждый раз, когда новая композиция подготовлена и показана. */
     val appliedVersion: StateFlow<Int> = _applied.asStateFlow()
     private var pendingSeekMs = -1L
+    private var pendingPreviewTransitionLeftId: Long? = null
     /** Play нажат, пока плеер ещё готовился. */
     private var playWhenReady = false
     private val _buffering = MutableStateFlow(false)
@@ -162,7 +163,7 @@ class TimelineController(
                     val request = CompositionRequest(snapshot, canvas, safeMode = safeMode, onTransitionFallback = { _events.tryEmit(it) },
                         liveTransforms = { id, localMs -> _state.value.transformAt(id, localMs) },
                         liveFx = { id -> com.base.editor.media.gl.FxParams(_state.value.chromas[id], _state.value.bgs[id]) },
-                        canvasBg = com.base.editor.core.CanvasBg.BLACK,
+                        canvasBg = canvasBg,
                         blurRadius = { blurRadius })
                     val composition = runCatching { factory.build(request) }
                         .onFailure { Log.e(TAG, "не удалось собрать композицию", it); _events.tryEmit("Не удалось подготовить предпросмотр") }
@@ -205,12 +206,44 @@ class TimelineController(
     fun loadTexts(json: String?) { textTrack.load(TextJson.decode(json)); _texts.value = textTrack.all() }
     fun serializeTexts(): String = TextJson.encode(textTrack.all())
 
-    fun addText(clip: TextClip) { textTrack.add(clip); textsChanged() }
+    fun addText(clip: TextClip) {
+        var start = clip.startMs.coerceAtLeast(0L)
+        val len = clip.durationMs
+        val others = textTrack.all().sortedBy { it.startMs }
+        for (other in others) {
+            if (start < other.startMs + other.durationMs && start + len > other.startMs) {
+                start = other.startMs + other.durationMs
+            }
+        }
+        textTrack.add(clip.copy(startMs = start))
+        textsChanged()
+    }
     fun updateText(clip: TextClip) { if (textTrack.update(clip)) textsChanged() }
     fun removeText(id: String) { if (textTrack.remove(id)) textsChanged() }
     fun findText(id: String) = textTrack.find(id)
     /** Перетаскивание текстового блока по шкале (долгое нажатие). */
-    fun moveText(id: String, startMs: Long) { textTrack.find(id)?.let { updateText(it.copy(startMs = startMs.coerceAtLeast(0))) } }
+    fun moveText(id: String, startMs: Long) {
+        val current = textTrack.find(id) ?: return
+        val len = current.durationMs
+        val others = textTrack.all().filter { it.id != id }.sortedBy { it.startMs }
+        val desired = startMs.coerceAtLeast(0L)
+        var result = -1L
+        var dist = Long.MAX_VALUE
+        var gapLo = 0L
+        fun consider(lo: Long, hi: Long) {
+            if (hi - lo < len) return
+            val cand = desired.coerceIn(lo, hi - len)
+            val d = kotlin.math.abs(cand - desired)
+            if (d < dist) { dist = d; result = cand }
+        }
+        others.forEach {
+            consider(gapLo, it.startMs)
+            gapLo = maxOf(gapLo, it.startMs + it.durationMs)
+        }
+        consider(gapLo, Long.MAX_VALUE / 2)
+        val finalStart = if (result >= 0) result else desired
+        updateText(current.copy(startMs = finalStart))
+    }
     private fun textsChanged() { _texts.value = textTrack.all(); _committed.tryEmit(Unit) }
 
     /** Размер кадра превью/экспорта. Меняется редко (смена пропорций или качества). */
@@ -248,7 +281,7 @@ class TimelineController(
     fun trimEnd(id: Long, ms: Long) { model.trimEnd(id, ms); publish() }
 
     /** Конец жеста: фиксируем и пересобираем композицию. */
-    fun commitEdit() { model.discardCheckpointIfNoop(); afterStructuralEdit() }
+    fun commitEdit() { model.compactMainAndSanitize(); model.discardCheckpointIfNoop(); afterStructuralEdit() }
 
     /** Положение кадра клипа на холсте: между beginEdit() и commitEdit() — без пересборки плеера. */
     fun setClipTransform(id: Long, t: ClipTransform) { if (model.setTransform(id, t)) publish() }
@@ -342,7 +375,6 @@ class TimelineController(
         publish()
         _committed.tryEmit(Unit)
         _applied.value++
-        if (playerReady && !player.isPlaying) rerenderCurrentFrame()
     }
 
     /**
@@ -423,12 +455,54 @@ class TimelineController(
     fun undo() { if (model.undo()) afterStructuralEdit() }
     fun redo() { if (model.redo()) afterStructuralEdit() }
 
+    /** Создает точную копию клипа (видео, фото, наложение, музыка). */
+    fun duplicateClip(id: Long): Long? {
+        pause(); model.checkpoint()
+        val newId = model.duplicateClip(id)
+        if (newId != null) {
+            afterStructuralEdit()
+        } else {
+            model.discardCheckpointIfNoop()
+        }
+        return newId
+    }
+
+    /** Обновляет URI клипа (например после реверса видео или звука). */
+    fun setClipUri(id: Long, newUri: String) {
+        pause(); model.checkpoint()
+        if (model.setClipUri(id, newUri)) {
+            afterStructuralEdit()
+        } else {
+            model.discardCheckpointIfNoop()
+        }
+    }
+
+    /** Создает точную копию текста на дорожке. */
+    fun duplicateText(id: String): String? {
+        val existing = textTrack.find(id) ?: return null
+        val len = existing.durationMs
+        var candidateStart = existing.startMs + len
+        val others = textTrack.all().filter { it.id != id }.sortedBy { it.startMs }
+        for (other in others) {
+            if (candidateStart < other.startMs + other.durationMs && candidateStart + len > other.startMs) {
+                candidateStart = other.startMs + other.durationMs
+            }
+        }
+        val dup = existing.copy(id = java.util.UUID.randomUUID().toString(), startMs = candidateStart)
+        textTrack.add(dup)
+        textsChanged()
+        return dup.id
+    }
+
+
+
     // ───────── переходы ─────────
     fun maxTransitionMs(leftId: Long) = model.maxTransitionMs(leftId)
     fun transitionAfter(leftId: Long) = _state.value.transitions.firstOrNull { it.leftId == leftId }
 
     /** shaderId == null — снять переход. */
     fun setTransition(leftId: Long, shaderId: String?, durationMs: Long): Boolean {
+        safeMode = false
         pause(); model.checkpoint()
         if (!model.setTransition(leftId, shaderId, durationMs)) { model.discardCheckpointIfNoop(); return false }
         model.discardCheckpointIfNoop()
@@ -438,11 +512,18 @@ class TimelineController(
 
     /** Проигрывает окно перехода (с запасом 0.4 с до и после) — «моментальный предпросмотр». */
     fun previewTransition(leftId: Long) {
+        pendingPreviewTransitionLeftId = leftId
         val t = transitionAfter(leftId) ?: return
         val junction = _state.value.clips.firstOrNull { it.id == t.rightId }?.startMs ?: return
-        seekTo((junction - PREVIEW_PAD_MS).coerceAtLeast(0))
+        val startMs = (junction - PREVIEW_PAD_MS).coerceAtLeast(0)
         stopAtMs = junction + t.durationMs + PREVIEW_PAD_MS
-        if (playerReady) resumePlayer()
+        _playhead.value = startMs
+        pendingSeekMs = startMs
+        playWhenReady = true
+        if (playerReady) {
+            seekPlayerSafely(startMs)
+            resumePlayer()
+        }
     }
 
     // ───────── воспроизведение ─────────
@@ -450,7 +531,19 @@ class TimelineController(
         if (_state.value.clips.none { it.row == 0 }) return
         stopAtMs = -1
         scrubEnd()                                                // доставить последнюю позицию перемотки
-        if (_playhead.value >= _state.value.totalMs - 50) seekTo(0)
+        if (_playhead.value >= _state.value.totalMs - 50) {
+            if (playerMulti) {
+                val old = player
+                old.removeListener(this)
+                runCatching { old.release() }
+                playerReady = false
+                player = createPlayer(true)
+                _playerFlow.value = player
+                applyOutput()
+                requestRebuild()
+            }
+            seekTo(0)
+        }
         if (player.playbackState == Player.STATE_IDLE) {
             seekInFlight = false
             resumePlayer()
@@ -520,9 +613,9 @@ class TimelineController(
                 val t = scrubTarget
                 if (t >= 0) {
                     val now = SystemClock.uptimeMillis()
-                    // Если декодер ещё декодирует предыдущий кадр, даём ему завершить вывод на экран (до 80 мс)
-                    if (seekInFlight && (now - lastSeekAt) < 80L) {
-                        delay(6)
+                    // Если декодер ещё декодирует предыдущий кадр, даём ему завершить вывод на экран (до 28 мс)
+                    if (seekInFlight && (now - lastSeekAt) < 28L) {
+                        delay(4)
                         continue
                     }
                     scrubTarget = -1
@@ -532,9 +625,9 @@ class TimelineController(
                         seekPlayerSafely(t)
                     }
                 }
-                delay(8)
+                delay(6)
                 if (scrubTarget < 0 && !seekInFlight) {
-                    delay(24)
+                    delay(16)
                     if (scrubTarget < 0) break
                 }
             }
@@ -583,6 +676,7 @@ class TimelineController(
     }
 
     private fun afterStructuralEdit() {
+        safeMode = false
         publish(); requestRebuild(); _committed.tryEmit(Unit)
     }
 
@@ -610,7 +704,7 @@ class TimelineController(
 
     override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int) {
         if (reason == Player.DISCONTINUITY_REASON_SEEK || reason == Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT) {
-            if (SystemClock.uptimeMillis() - lastSeekAt > 100L) seekInFlight = false
+            seekInFlight = false
         }
     }
 
@@ -623,7 +717,7 @@ class TimelineController(
         Log.d("BasePlayer", "состояние=$playbackState pos=${player.currentPosition}")
         _buffering.value = playbackState == Player.STATE_BUFFERING
         if (playbackState == Player.STATE_READY) {
-            if (SystemClock.uptimeMillis() - lastSeekAt > 100L) seekInFlight = false
+            seekInFlight = false
         }
         // сторожок: если буферизация затянулась (декодер завис), перемещаем плеер в ту же позицию и переподключаем поверхность
         bufferingJob?.cancel()
@@ -637,12 +731,39 @@ class TimelineController(
         when (playbackState) {
             Player.STATE_IDLE -> playerReady = false
             Player.STATE_READY, Player.STATE_ENDED -> {
+                val wasReady = playerReady
                 if (!playerReady) _applied.value++
                 playerReady = true
                 val p = pendingSeekMs
                 if (p >= 0) {                                   // отложенная перемотка (скраб до готовности)
                     val total = _state.value.totalMs
-                    if (total > 0 && p != player.currentPosition) seekPlayerSafely(p.coerceIn(0L, total)) else pendingSeekMs = -1
+                    if (total > 0) {
+                        if (!wasReady && p == 0L && total > 1L) {
+                            seekPlayerSafely(1L)
+                        } else if (p != player.currentPosition || !wasReady) {
+                            seekPlayerSafely(p.coerceIn(0L, total))
+                        } else {
+                            pendingSeekMs = -1
+                        }
+                    } else {
+                        pendingSeekMs = -1
+                    }
+                } else if (!wasReady && !player.isPlaying && outSurface != null) {
+                    rerenderCurrentFrame()
+                }
+                val previewLeft = pendingPreviewTransitionLeftId
+                if (previewLeft != null) {
+                    pendingPreviewTransitionLeftId = null
+                    val t = transitionAfter(previewLeft)
+                    if (t != null) {
+                        val junction = _state.value.clips.firstOrNull { it.id == t.rightId }?.startMs
+                        if (junction != null) {
+                            val startMs = (junction - PREVIEW_PAD_MS).coerceAtLeast(0)
+                            stopAtMs = junction + t.durationMs + PREVIEW_PAD_MS
+                            seekPlayerSafely(startMs)
+                            playWhenReady = true
+                        }
+                    }
                 }
                 if (playbackState == Player.STATE_ENDED) { _playing.value = false; _playhead.value = _state.value.totalMs }
                 else if (playWhenReady) { playWhenReady = false; runCatching { player.play() } }   // отложенный Play
@@ -657,17 +778,21 @@ class TimelineController(
      */
     override fun onPlayerError(error: PlaybackException) {
         Log.e(TAG, "ошибка плеера: ${error.errorCodeName}", error)
-        val codecRelated = error.errorCode in CODEC_ERRORS
+        val old = player
+        old.removeListener(this)
+        runCatching { old.release() }
+        playerReady = false
+        player = createPlayer(playerMulti)
+        _playerFlow.value = player
+        applyOutput()
         if (!safeMode) {
             safeMode = true
             _events.tryEmit("Сброс графического конвейера...")
-            requestRebuild()
         } else {
-            Log.e("BasePlayer", "ошибка плеера", error)
             val root = generateSequence<Throwable>(error) { it.cause }.last()
             _events.tryEmit("Не удалось воспроизвести: ${error.errorCodeName} (${root.javaClass.simpleName}: ${root.message?.take(80)})")
-            requestRebuild()
         }
+        requestRebuild()
     }
 
     private companion object {

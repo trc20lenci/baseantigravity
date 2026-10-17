@@ -31,7 +31,7 @@ object CaptionJson {
     }
 
     private fun style(s: CaptionStyle) = JSONObject()
-        .put("id", s.id).put("name", s.name).put("font", s.font.name).put("weight", s.fontWeight).put("italic", s.italic)
+        .put("id", s.id).put("name", s.name).put("font", s.font.name).put("fontId", s.fontId).put("weight", s.fontWeight).put("italic", s.italic)
         .put("upper", s.uppercase).put("size", s.sizeFrac.toDouble()).put("ls", s.letterSpacingEm.toDouble())
         .put("text", s.textColor).put("active", s.activeColor).put("stroke", s.strokeColor).put("strokeEm", s.strokeEm.toDouble())
         .put("bg", s.backgroundColor).put("bgPad", s.backgroundPaddingEm.toDouble()).put("bgRad", s.backgroundCornerEm.toDouble())
@@ -41,9 +41,12 @@ object CaptionJson {
 
     private fun style(o: JSONObject): CaptionStyle {
         val d = CaptionPresets.default
+        val legacyFont = runCatching { CaptionFont.valueOf(o.optString("font")) }.getOrDefault(d.font)
+        val fId = o.optString("fontId", o.optString("font", legacyFont.name))
         return CaptionStyle(
             id = o.optString("id", d.id), name = o.optString("name", d.name),
-            font = runCatching { CaptionFont.valueOf(o.optString("font")) }.getOrDefault(d.font),
+            font = legacyFont,
+            fontId = fId,
             fontWeight = o.optInt("weight", d.fontWeight), italic = o.optBoolean("italic", d.italic),
             uppercase = o.optBoolean("upper", d.uppercase), sizeFrac = o.optDouble("size", d.sizeFrac.toDouble()).toFloat(),
             letterSpacingEm = o.optDouble("ls", 0.0).toFloat(),

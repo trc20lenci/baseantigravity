@@ -16,8 +16,6 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
-import com.base.editor.ui.theme.staggeredEnter
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
@@ -98,8 +96,8 @@ fun HomeScreen(
         }
         Spacer(Modifier.height(20.dp))
         LazyRow(contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 20.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            itemsIndexed(projects.take(6), key = { _, p -> p.id }) { i, p ->
-                Box(Modifier.staggeredEnter(i).pressable { onOpen(p.id) }.size(88.dp).clip(RoundedCornerShape(14.dp))) {
+            items(projects.take(6), key = { it.id }) { p ->
+                Box(Modifier.pressable { onOpen(p.id) }.size(88.dp).clip(RoundedCornerShape(14.dp))) {
                     ProjectThumb(p, Modifier.fillMaxSize())
                     Row(Modifier.align(Alignment.BottomStart).padding(6.dp), verticalAlignment = Alignment.CenterVertically) {
                         Icon(Lucide.Scissors, null, tint = Color.White, modifier = Modifier.size(12.dp))

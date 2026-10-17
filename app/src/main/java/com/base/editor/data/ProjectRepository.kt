@@ -38,6 +38,10 @@ class ProjectRepository private constructor(private val app: Context) {
             val len = if (m.type == MediaType.VIDEO) m.durationMs else IMAGE_DEFAULT_MS
             tl.addClip(0, m.type, m.uri, if (m.type == MediaType.VIDEO) m.durationMs else 0, len)
         }
+        // В самый конец видео/фото добавляется видео из папки "for base", если оно есть
+        com.base.editor.media.OutroHelper.getOutro(app)?.let { outro ->
+            tl.addClip(0, MediaType.VIDEO, outro.uri, outro.durationMs, outro.durationMs)
+        }
         write(id, name = nextName(), timeline = tl.serialize(), clips = tl.state().clips)
         id
     }

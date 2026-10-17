@@ -6,6 +6,17 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.Crossfade
 import com.base.editor.ui.theme.BaseMotion
 import com.base.editor.ui.theme.haptic
+import com.base.editor.ui.theme.pressable
+import com.base.editor.captions.GenerationState
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.runtime.produceState
+import kotlinx.coroutines.delay
+import kotlin.math.sin
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -153,6 +164,7 @@ fun EditorScreen(onClose: () -> Unit, onAddMedia: () -> Unit, vm: EditorViewMode
     val selCaption by vm.selectedCaptionId.collectAsStateWithLifecycle()
     val textSub by vm.textSub.collectAsStateWithLifecycle()
     val textInput by vm.textInputOpen.collectAsStateWithLifecycle()
+    val textEditorTab by vm.textEditorTab.collectAsStateWithLifecycle()
     val captionInput by vm.captionInputOpen.collectAsStateWithLifecycle()
     val exportSheet by vm.exportSheetOpen.collectAsStateWithLifecycle()
     val mediaTool by vm.mediaTool.collectAsStateWithLifecycle()
@@ -161,6 +173,8 @@ fun EditorScreen(onClose: () -> Unit, onAddMedia: () -> Unit, vm: EditorViewMode
     val ttsOpen by vm.ttsSheetOpen.collectAsStateWithLifecycle()
     val canvasBgSel by vm.canvasBg.collectAsStateWithLifecycle()
     val blurRadius by vm.blurRadius.collectAsStateWithLifecycle()
+    val customBgUri by vm.customBgUri.collectAsStateWithLifecycle()
+    val projectBgImages by vm.projectBgImages.collectAsStateWithLifecycle()
     val pagTemplates by vm.pagTemplates.collectAsStateWithLifecycle()
 
     SideEffect { vm.onRequestAddMedia = onAddMedia }
@@ -193,8 +207,15 @@ fun EditorScreen(onClose: () -> Unit, onAddMedia: () -> Unit, vm: EditorViewMode
         }
     }
 
-    // строка ввода (клавиатура) — маленькое окно у нижнего края без затемнения; остальное редактирование — в панели инструментов
-    if (textInput) texts.firstOrNull { it.id == selText }?.let { TextInputSheet(it.text, onChange = vm::setTextValue, onDone = vm::closeTextInput) }
+    // Вкладка редактирования текста (шрифты, стили, цвета, размер, затемнение)
+    if (textInput) texts.firstOrNull { it.id == selText }?.let { clip ->
+        ModernTextEditorSheet(
+            clip = clip,
+            initialTab = textEditorTab,
+            onChange = { transform -> vm.editText(transform) },
+            onDone = vm::closeTextInput,
+        )
+    }
     if (captionInput) captionItems.firstOrNull { it.id == selCaption }?.let { TextInputSheet(it.text, onChange = vm::setCaptionValue, onDone = vm::closeCaptionInput) }
     if (exportSheet) ExportSheet(
         durationMs = vm.totalMs.value, initialResolution = vm.resolution.value, initialFps = vm.exportFps.value,
@@ -214,16 +235,59 @@ fun EditorScreen(onClose: () -> Unit, onAddMedia: () -> Unit, vm: EditorViewMode
         CropDialog(frame, init, onDone = vm::applyCrop, onCancel = vm::cancelCrop)
     }
 
+    if (captionPanel) {
+        val playhead by vm.playheadMs.collectAsStateWithLifecycle()
+        CaptionPanel(
+            items = captionItems, style = captionStyle, generation = captionGen, playheadMs = playhead, editingId = editingCaption,
+            onPrefetch = vm::prefetchCaptionModel,
+            onGenerate = { lang ->
+                vm.closeCaptions()
+                vm.generateCaptions(lang)
+            },
+            onCancel = vm.captions::cancelGeneration, onDismissError = vm.captions::dismissError,
+            onOpenItem = vm::openCaptionItem, onCloseEdit = { vm.editingCaptionId.value = null },
+            onUpdateText = vm.captions::updateText, onUpdateTiming = vm.captions::updateTiming, onDelete = vm.captions::delete,
+            onAdd = vm::addCaptionHere, onClearAll = vm.captions::clearAll,
+            onPreset = vm.captions::applyPreset, onStyle = vm.captions::updateStyle, onClose = vm::closeCaptions,
+        )
+    }
+
+    LaunchedEffect(captionGen) {
+        val st = captionGen
+        if (st is GenerationState.Failed) {
+            vm.events.value = st.message
+            vm.captions.dismissError()
+        }
+    }
+
     Column(Modifier.fillMaxSize().background(BaseColors.DarkBg).systemBarsPadding()) {
-        // верхняя панель: только выход, логотип и «Экспорт» — параметры рендера в отдельном листе
-        AnimatedVisibility(!fullscreen, enter = barEnter, exit = barExit) { Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            RoundIcon(Lucide.X, "Выйти", ::close)
-            Spacer(Modifier.width(8.dp))
-            Image(painterResource(R.drawable.logo_base_white), "BASE", Modifier.height(20.dp))
-            Spacer(Modifier.weight(1f))
-            Text("Экспорт", Modifier.pressable(onClick = vm::openExportSheet).clip(RoundedCornerShape(12.dp)).background(BaseColors.Primary).padding(horizontal = 18.dp, vertical = 10.dp),
-                color = Color.Black, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-        } }
+        // верхняя панель: логотип BASE, круглый крестик, пилюля формата и пилюля экспорта
+        AnimatedVisibility(!fullscreen, enter = barEnter, exit = barExit) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                RoundIcon(Lucide.X, "Выйти", ::close)
+                Spacer(Modifier.width(8.dp))
+                Image(painterResource(R.drawable.logo_base_white), "BASE", Modifier.height(20.dp))
+                Spacer(Modifier.weight(1f))
+                val curFormat by vm.format.collectAsStateWithLifecycle()
+                FormatTopButton(curFormat, onClick = { if (formatPanel) vm.closeFormat() else vm.openFormat() })
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "Экспорт",
+                    Modifier
+                        .pressable(onClick = vm::openExportSheet)
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(BaseColors.Primary)
+                        .padding(horizontal = 18.dp, vertical = 10.dp),
+                    color = Color.Black,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1
+                )
+            }
+        }
 
         // плеер занимает всё, что осталось над фиксированной нижней областью, поэтому его размер не меняется
         // ни при открытии панелей, ни при смене инструментов
@@ -235,19 +299,20 @@ fun EditorScreen(onClose: () -> Unit, onAddMedia: () -> Unit, vm: EditorViewMode
 
             // Нижняя область ФИКСИРОВАННОЙ высоты: таймлайн + панель инструментов. Таймлайн живой в любом режиме
             // редактирования (клип, аудио, текст, субтитры): мотать проект и двигать курсор можно всегда.
-            val panelOpen = captionPanel || transitionFor != null || formatPanel || mediaTool != null
-            Box(Modifier.fillMaxWidth().height((TL_HEIGHT_DP + TOOLBAR_HEIGHT_DP).dp).background(BaseColors.DarkBg)) {
+            val mode = when {
+                bgBar && selText == null && selCaption == null && selected == null -> ToolMode.BACKGROUND
+                selText != null -> ToolMode.TEXT
+                selCaption != null -> ToolMode.CAPTION
+                selected != null && clips.firstOrNull { it.id == selected }?.type == com.base.editor.core.MediaType.AUDIO -> ToolMode.AUDIO
+                selected != null -> ToolMode.MEDIA
+                else -> ToolMode.MAIN
+            }
+            val toolbarH = TOOLBAR_HEIGHT_DP
+            val panelOpen = transitionFor != null || formatPanel || mediaTool != null
+            Box(Modifier.fillMaxWidth().height((TL_HEIGHT_DP + toolbarH).dp).background(BaseColors.DarkBg)) {
                 Column(Modifier.fillMaxSize()) {
                     TimelineHost(vm, clips, transitions, captionItems, texts, keyframes, selected, selText, selCaption)
-                    val mode = when {
-                        bgBar && selText == null && selCaption == null && selected == null -> ToolMode.BACKGROUND
-                        selText != null -> ToolMode.TEXT
-                        selCaption != null -> ToolMode.CAPTION
-                        selected != null && clips.firstOrNull { it.id == selected }?.type == com.base.editor.core.MediaType.AUDIO -> ToolMode.AUDIO
-                        selected != null -> ToolMode.MEDIA
-                        else -> ToolMode.MAIN
-                    }
-                    Crossfade(mode, animationSpec = androidx.compose.animation.core.tween(160, easing = EaseOutStrong), label = "toolbar", modifier = Modifier.fillMaxWidth().height(TOOLBAR_HEIGHT_DP.dp).background(BaseColors.DarkPanel)) { m ->
+                    Crossfade(mode, animationSpec = androidx.compose.animation.core.tween(160, easing = EaseOutStrong), label = "toolbar", modifier = Modifier.fillMaxWidth().height(toolbarH.dp).background(BaseColors.DarkPanel)) { m ->
                         when (m) {
                             ToolMode.MAIN -> ScrollToolRow {
                                 ToolButton(Lucide.Scissors, "Изменить") { vm.selectAtPlayhead() }
@@ -255,25 +320,46 @@ fun EditorScreen(onClose: () -> Unit, onAddMedia: () -> Unit, vm: EditorViewMode
                                 ToolButton(Lucide.Type, "Текст", onClick = vm::openNewText)
                                 ToolButton(Lucide.Captions, "Субтитры", onClick = vm::openCaptions)
                                 ToolButton(Lucide.AudioLines, "Озвучка", onClick = vm::openTtsSheet)
-                                ToolButton(Lucide.Ratio, "Формат", onClick = vm::openFormat)
                                 ToolButton(Lucide.Layers, "Наложение", onClick = vm::addOverlay)
                                 ToolButton(Lucide.Image, "Фон", onClick = vm::openBgBar)
                             }
                             ToolMode.MEDIA -> ScrollToolRow {
                                 ToolButton(Lucide.ChevronLeft, "Назад") { vm.select(null) }
                                 ToolButton(Lucide.SquareSplitHorizontal, "Разделить", onClick = vm::split)
+                                ToolButton(Lucide.Copy, "Копия", onClick = vm::duplicateSelected)
+                                ToolButton(Lucide.RotateCcw, "Реверс", onClick = vm::reverseSelected)
                                 ToolButton(Lucide.Gauge, "Скорость") { vm.openMediaTool(MediaTool.SPEED) }
                                 ToolButton(Lucide.Volume2, "Громкость") { vm.openMediaTool(MediaTool.VOLUME) }
                                 ToolButton(Lucide.WandSparkles, "Фон") { vm.openMediaTool(MediaTool.BG) }
                                 ToolButton(Lucide.Pipette, "Хромакей") { vm.openMediaTool(MediaTool.CHROMA) }
                                 ToolButton(Lucide.Crop, "Кадрирование", onClick = vm::openCrop)
-                                ToolButton(Lucide.Sparkles, "Анимации") { soon(ctx) }
                                 ToolButton(Lucide.Trash2, "Удалить", onClick = vm::deleteSelected)
                             }
-                            ToolMode.BACKGROUND -> BackgroundsBar(canvasBgSel, blurRadius, onPick = vm::setCanvasBg, onBlurRadiusChange = vm::setBlurRadius, onBack = vm::closeBgBar)
-                            ToolMode.AUDIO -> ToolRow {
+                            ToolMode.BACKGROUND -> {
+                                val curPlayhead = vm.playheadMs.value
+                                val curClip = clips.firstOrNull { it.row == 0 && curPlayhead in it.startMs..it.endMs } ?: clips.firstOrNull { it.row == 0 }
+                                val localMs = (curPlayhead - (curClip?.startMs ?: 0L)).coerceAtLeast(0L)
+                                val srcMs = ((curClip?.srcInMs ?: 0L) + localMs * (curClip?.speed ?: 1f)).toLong()
+                                BackgroundsBar(
+                                    current = canvasBgSel,
+                                    blurRadius = blurRadius,
+                                    customImageUri = customBgUri,
+                                    projectBgImages = projectBgImages,
+                                    previewClipUri = curClip?.uri,
+                                    previewClipType = curClip?.type,
+                                    previewClipTimeMs = srcMs,
+                                    onPick = vm::setCanvasBg,
+                                    onBlurRadiusChange = vm::setBlurRadius,
+                                    onPickCustomImage = vm::setCustomBgImage,
+                                    onSelectImage = vm::selectBgImage,
+                                    onBack = vm::closeBgBar,
+                                )
+                            }
+                            ToolMode.AUDIO -> ScrollToolRow {
                                 ToolButton(Lucide.ChevronLeft, "Назад") { vm.select(null) }
                                 ToolButton(Lucide.SquareSplitHorizontal, "Разделить", onClick = vm::split)
+                                ToolButton(Lucide.Copy, "Копия", onClick = vm::duplicateSelected)
+                                ToolButton(Lucide.RotateCcw, "Реверс", onClick = vm::reverseSelected)
                                 ToolButton(Lucide.Gauge, "Скорость") { vm.openMediaTool(MediaTool.SPEED) }
                                 ToolButton(Lucide.Volume2, "Громкость") { vm.openMediaTool(MediaTool.VOLUME) }
                                 ToolButton(Lucide.Trash2, "Удалить", onClick = vm::deleteSelected)
@@ -282,7 +368,7 @@ fun EditorScreen(onClose: () -> Unit, onAddMedia: () -> Unit, vm: EditorViewMode
                                 TextToolbar(
                                     clip = t, sub = textSub, templates = pagTemplates,
                                     onBack = { vm.select(null) }, onSub = vm::setTextSub, onEditText = vm::openTextInput,
-                                    onSplit = vm::splitText, onDelete = vm::deleteText, onChange = vm::editText,
+                                    onSplit = vm::splitText, onDuplicate = vm::duplicateSelected, onDelete = vm::deleteText, onChange = vm::editText,
                                     onStyle = vm::applyTextStyle, onAnimation = vm::applyTextAnimation, onImportPag = vm::importPag,
                                 )
                             }
@@ -297,22 +383,10 @@ fun EditorScreen(onClose: () -> Unit, onAddMedia: () -> Unit, vm: EditorViewMode
                     }
                 }
 
-                // пока открыта большая панель (субтитры, переходы, формат) — всё под ней не реагирует на касания
+                // пока открыта большая панель (переходы, формат) — всё под ней не реагирует на касания
                 if (panelOpen) Box(Modifier.matchParentSize().pointerInput(Unit) {
                     awaitPointerEventScope { while (true) awaitPointerEvent().changes.forEach { it.consume() } }
                 })
-
-                BottomPanel(visible = captionPanel) {
-                    val playhead by vm.playheadMs.collectAsStateWithLifecycle()
-                    CaptionPanel(
-                        items = captionItems, style = captionStyle, generation = captionGen, playheadMs = playhead, editingId = editingCaption,
-                        onPrefetch = vm::prefetchCaptionModel, onGenerate = vm::generateCaptions, onCancel = vm.captions::cancelGeneration, onDismissError = vm.captions::dismissError,
-                        onOpenItem = vm::openCaptionItem, onCloseEdit = { vm.editingCaptionId.value = null },
-                        onUpdateText = vm.captions::updateText, onUpdateTiming = vm.captions::updateTiming, onDelete = vm.captions::delete,
-                        onAdd = vm::addCaptionHere, onClearAll = vm.captions::clearAll,
-                        onPreset = vm.captions::applyPreset, onStyle = vm.captions::updateStyle, onClose = vm::closeCaptions,
-                    )
-                }
                 val toolClip = clips.firstOrNull { it.id == selected }
                 BottomPanel(visible = mediaTool != null && toolClip != null) {
                     if (toolClip != null) when (mediaTool) {
@@ -351,6 +425,19 @@ fun EditorScreen(onClose: () -> Unit, onAddMedia: () -> Unit, vm: EditorViewMode
             }
           }
         }
+    }
+
+    val ttsBusy by vm.ttsBusy.collectAsStateWithLifecycle()
+    val isGenCaptions = captionGen is GenerationState.Downloading || captionGen is GenerationState.Recognizing
+    if (isGenCaptions || ttsBusy) {
+        GenerationProgressModal(
+            isTts = ttsBusy,
+            captionGen = captionGen,
+            onCancel = {
+                if (ttsBusy) vm.cancelTts()
+                else vm.captions.cancelGeneration()
+            }
+        )
     }
 }
 
@@ -418,9 +505,47 @@ private fun PreviewStage(
     var gl by remember { mutableStateOf<PreviewGlView?>(null) }
     gl?.let { view ->
         // всё, что связано с жестом и кадром, идёт мимо композиции — напрямую в GL-вид
-        LaunchedEffect(view) { vm.controller.videoAspect.collect { view.setFrameAspect(it) } }
+        LaunchedEffect(view) { vm.mainAspect.collect { view.setFrameAspect(it) } }
+        LaunchedEffect(view) { vm.mainClipTransform.collect { view.setCommittedTransform(it) } }
         LaunchedEffect(view) { vm.canvasAspect.collect { view.setCanvasAspect(it) } }
-        LaunchedEffect(view) { vm.canvasBg.collect { view.setCanvasBackground(it.argb, it == com.base.editor.core.CanvasBg.BLUR) } }
+        LaunchedEffect(view) {
+            vm.canvasBg.collect {
+                view.setCanvasBackground(it.argb, it == com.base.editor.core.CanvasBg.BLUR, it == com.base.editor.core.CanvasBg.IMAGE)
+            }
+        }
+        LaunchedEffect(view) {
+            kotlinx.coroutines.flow.combine(vm.customBgUri, vm.canvasBg) { uri, bg ->
+                if (bg == com.base.editor.core.CanvasBg.IMAGE && uri != null) uri else null
+            }.collect { uriStr ->
+                if (uriStr == null) {
+                    view.setCustomBackgroundImage(null)
+                } else {
+                    withContext(Dispatchers.IO) {
+                        val bmp = runCatching {
+                            val u = android.net.Uri.parse(uriStr)
+                            val c = view.context
+                            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                                android.graphics.ImageDecoder.decodeBitmap(
+                                    android.graphics.ImageDecoder.createSource(c.contentResolver, u)
+                                ) { dec, info, _ ->
+                                    dec.allocator = android.graphics.ImageDecoder.ALLOCATOR_SOFTWARE
+                                    val maxDim = 1280
+                                    if (info.size.width > maxDim || info.size.height > maxDim) {
+                                        val scale = maxDim.toFloat() / maxOf(info.size.width, info.size.height)
+                                        dec.setTargetSize((info.size.width * scale).toInt(), (info.size.height * scale).toInt())
+                                    }
+                                }
+                            } else {
+                                c.contentResolver.openInputStream(u)?.use { android.graphics.BitmapFactory.decodeStream(it) }
+                            }
+                        }.getOrNull()
+                        withContext(Dispatchers.Main) {
+                            view.setCustomBackgroundImage(bmp)
+                        }
+                    }
+                }
+            }
+        }
         LaunchedEffect(view) { vm.blurRadius.collect { view.setBlurRadius(it) } }
         LaunchedEffect(view) { vm.canvasPx.collect { (w, h) -> view.setBufferSize(w, h) } }
         LaunchedEffect(view) {
@@ -474,6 +599,8 @@ private fun PreviewStage(
                     },
                 )
             }
+            val overlayClips = clips.filter { it.row == com.base.editor.media.CompositionFactory.OVERLAY_ROW }
+            OverlayStageLayer(overlayClips, playhead, playing, liveClipState.value, vm::effectiveTransform)
             val visibleTexts = texts.filter { it.isVisibleAt(playhead) }
             TextOverlay(visibleTexts.filter { it.pagTemplate == null }, aspectNow, playhead)
             visibleTexts.filter { it.pagTemplate != null }.forEach { PagTitleOverlay(it, playhead, aspectNow) }
@@ -482,16 +609,35 @@ private fun PreviewStage(
             val target = remember(selected, selText, texts, playhead, clips, clipAspects, cropClip, rev) { vm.canvasTarget() }
             CanvasTransformOverlay(aspectNow, target, visibleTexts, vm, liveClipState)
             if (pipOn) PipetteOverlay(pipPos) { pos, w, h -> vm.movePipette(pos, w, h) }
+
         }
-        // полноэкранный режим: иконка внизу справа; в полноэкранном — ещё Play/Pause и время
+        // полноэкранный режим: иконка внизу справа; в полноэкранном — Play/Pause, время, полоса перемотки и сворачивание
         if (fullscreen) {
-            Row(Modifier.align(Alignment.BottomStart).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                RoundIcon(if (playing) Lucide.Pause else Lucide.Play, if (playing) "Пауза" else "Воспроизвести", vm::togglePlay, size = 48.dp)
-                Text("  ${Format.duration(playhead)} / ${Format.duration(total)}", color = Color.White, fontSize = 14.sp)
+            Row(
+                Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                RoundIcon(if (playing) Lucide.Pause else Lucide.Play, if (playing) "Пауза" else "Воспроизвести", vm::togglePlay, size = 44.dp)
+                Spacer(Modifier.width(8.dp))
+                Text("${Format.duration(playhead)} / ${Format.duration(total)}", color = Color.White, fontSize = 13.sp)
+                androidx.compose.material3.Slider(
+                    value = playhead.toFloat(),
+                    onValueChange = { vm.scrubTo(it.toLong()) },
+                    onValueChangeFinished = { vm.scrubEnd() },
+                    valueRange = 0f..total.coerceAtLeast(1L).toFloat(),
+                    modifier = Modifier.weight(1f).padding(horizontal = 12.dp),
+                    colors = androidx.compose.material3.SliderDefaults.colors(
+                        thumbColor = BaseColors.Primary,
+                        activeTrackColor = BaseColors.Primary,
+                        inactiveTrackColor = Color.White.copy(alpha = 0.25f),
+                    ),
+                )
+                RoundIcon(Lucide.Minimize, "Выйти из полноэкранного режима", onToggleFullscreen, size = 44.dp)
             }
-        }
-        Box(Modifier.align(Alignment.BottomEnd).padding(10.dp)) {
-            RoundIcon(if (fullscreen) Lucide.Minimize else Lucide.Maximize, if (fullscreen) "Выйти из полноэкранного режима" else "На весь экран", onToggleFullscreen)
+        } else {
+            Box(Modifier.align(Alignment.BottomEnd).padding(10.dp)) {
+                RoundIcon(Lucide.Maximize, "На весь экран", onToggleFullscreen)
+            }
         }
     }
 }
@@ -504,6 +650,10 @@ private fun TransportRow(vm: EditorViewModel, hasMainSelected: Boolean) {
     val playing by vm.isPlaying.collectAsStateWithLifecycle()
     val canUndo by vm.canUndo.collectAsStateWithLifecycle()
     val canRedo by vm.canRedo.collectAsStateWithLifecycle()
+    val keyframesRev by vm.keyframesRevision.collectAsStateWithLifecycle()
+    val keyframes by vm.keyframes.collectAsStateWithLifecycle()
+    val hasKey = remember(playhead, keyframesRev, keyframes, hasMainSelected) { vm.hasKeyframeAtCursor() }
+
     Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), contentAlignment = Alignment.Center) {
         Row(Modifier.align(Alignment.CenterStart)) {
             Text(Format.duration(playhead), color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
@@ -513,7 +663,7 @@ private fun TransportRow(vm: EditorViewModel, hasMainSelected: Boolean) {
         Row(Modifier.align(Alignment.CenterEnd), verticalAlignment = Alignment.CenterVertically) {
             // ромбик ключевого кадра: только когда выбран клип основной дорожки (режим «Изменить»)
             if (hasMainSelected) {
-                KeyframeButton(hasKey = vm.hasKeyframeAtCursor(), onClick = vm::toggleKeyframe)
+                KeyframeButton(hasKey = hasKey, onClick = vm::toggleKeyframe)
                 Spacer(Modifier.width(4.dp))
             }
             RoundIcon(Lucide.Undo2, "Отменить", vm::undo, enabled = canUndo)
@@ -555,26 +705,135 @@ private fun TimelineHost(
     }
 }
 
-private const val TOOLBAR_HEIGHT_DP = 68
+private const val TOOLBAR_HEIGHT_DP = 74
 
-/** Панель «Формат»: пресеты пропорций холста. */
 @Composable
-private fun FormatPanel(current: com.base.editor.core.CanvasFormat, onPick: (com.base.editor.core.CanvasFormat) -> Unit, onClose: () -> Unit) {
-    Column(Modifier.fillMaxWidth().background(BaseColors.DarkPanel).padding(horizontal = 12.dp, vertical = 10.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Формат", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+private fun FormatIcon(format: com.base.editor.core.CanvasFormat, tint: Color, size: androidx.compose.ui.unit.Dp = 16.dp) {
+    val aspect = format.aspect ?: (9f / 16f)
+    Box(
+        modifier = Modifier.size(size),
+        contentAlignment = Alignment.Center
+    ) {
+        val (w, h) = if (aspect >= 1f) {
+            size to (size / aspect)
+        } else {
+            (size * aspect) to size
+        }
+        Box(
+            modifier = Modifier
+                .size(w.coerceAtLeast(6.dp), h.coerceAtLeast(6.dp))
+                .border(1.5.dp, tint, RoundedCornerShape(2.dp))
+        )
+    }
+}
+
+@Composable
+private fun FormatTopButton(
+    format: com.base.editor.core.CanvasFormat,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .height(38.dp)
+            .clip(RoundedCornerShape(20.dp))
+            .background(Color.White.copy(alpha = 0.08f))
+            .pressable(onClick = onClick)
+            .padding(horizontal = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        FormatIcon(format, tint = Color.White, size = 16.dp)
+        Text(
+            text = format.label,
+            color = Color.White,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium
+        )
+        Icon(
+            imageVector = Lucide.ChevronDown,
+            contentDescription = null,
+            tint = Color.White.copy(alpha = 0.7f),
+            modifier = Modifier.size(14.dp)
+        )
+    }
+}
+
+/** Панель «Соотношение сторон»: пресеты пропорций холста в виде карточек. */
+@Composable
+private fun FormatPanel(
+    current: com.base.editor.core.CanvasFormat,
+    onPick: (com.base.editor.core.CanvasFormat) -> Unit,
+    onClose: () -> Unit
+) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
+            .background(Color(0xFF1E1E20))
+            .padding(top = 10.dp, bottom = 16.dp)
+    ) {
+        // Drag handle
+        Box(
+            Modifier
+                .align(Alignment.CenterHorizontally)
+                .width(36.dp)
+                .height(4.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(Color.White.copy(alpha = 0.3f))
+        )
+        Spacer(Modifier.height(12.dp))
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "Соотношение сторон",
+                color = Color.White,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.Bold
+            )
             Spacer(Modifier.weight(1f))
             RoundIcon(Lucide.Check, "Готово", onClose)
         }
-        Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Spacer(Modifier.height(14.dp))
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
             com.base.editor.core.CanvasFormat.entries.forEach { f ->
                 val on = f == current
-                Box(
-                    Modifier.pressable { onPick(f) }.weight(1f).clip(RoundedCornerShape(10.dp))
-                        .background(animatedSelectColor(on, offColor = Color.White.copy(alpha = .1f)))
-                        .padding(vertical = 12.dp),
-                    contentAlignment = Alignment.Center,
-                ) { Text(f.label, color = if (on) Color.Black else Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1) }
+                val cardBg = if (on) Color(0xFFE5E5EA) else Color(0xFF2C2C2E)
+                val contentColor = if (on) Color.Black else Color.White
+                Column(
+                    modifier = Modifier
+                        .width(76.dp)
+                        .height(82.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(cardBg)
+                        .pressable { onPick(f) }
+                        .padding(vertical = 10.dp, horizontal = 6.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Box(
+                        modifier = Modifier.weight(1f),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        FormatIcon(f, tint = contentColor, size = 26.dp)
+                    }
+                    Text(
+                        text = f.label,
+                        color = contentColor,
+                        fontSize = 12.sp,
+                        fontWeight = if (on) FontWeight.Bold else FontWeight.Medium,
+                        maxLines = 1
+                    )
+                }
             }
         }
     }
@@ -752,4 +1011,169 @@ private fun ExportDialog(state: ExportState, onCancel: () -> Unit, onDismiss: ()
         confirmButton = { if (finished) TextButton(onDismiss) { Text("OK", color = BaseColors.Primary) } },
         dismissButton = { if (!finished) TextButton(onCancel) { Text("Отмена", color = Color.White) } },
     )
+}
+
+@Composable
+private fun GenerationProgressModal(
+    isTts: Boolean,
+    captionGen: GenerationState,
+    onCancel: () -> Unit,
+) {
+    val inf = rememberInfiniteTransition(label = "wave_inf")
+    val phase by inf.animateFloat(
+        initialValue = 0f,
+        targetValue = (2 * Math.PI).toFloat(),
+        animationSpec = infiniteRepeatable(
+            animation = tween(1200, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "phase"
+    )
+
+    val percent: Int = when {
+        isTts -> {
+            val p by produceState(initialValue = 15) {
+                var v = 15
+                while (v < 92) {
+                    delay(130)
+                    v += (2..5).random()
+                    value = v.coerceAtMost(92)
+                }
+            }
+            p
+        }
+        captionGen is GenerationState.Downloading -> {
+            if (captionGen.fraction > 0f) (captionGen.fraction * 50).toInt().coerceIn(1, 50)
+            else 15
+        }
+        captionGen is GenerationState.Recognizing -> {
+            if (captionGen.fraction > 0f) (50 + captionGen.fraction * 50).toInt().coerceIn(51, 99)
+            else {
+                val p by produceState(initialValue = 20) {
+                    var v = 20
+                    while (v < 92) {
+                        delay(160)
+                        v += (1..4).random()
+                        value = v.coerceAtMost(92)
+                    }
+                }
+                p
+            }
+        }
+        else -> 15
+    }
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.65f))
+            .pressable { /* absorb clicks */ },
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            Modifier
+                .width(280.dp)
+                .clip(RoundedCornerShape(24.dp))
+                .background(Color(0xFF23252E))
+                .padding(horizontal = 22.dp, vertical = 20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Box(
+                Modifier
+                    .size(32.dp, 3.dp)
+                    .clip(RoundedCornerShape(1.5.dp))
+                    .background(Color.White.copy(alpha = 0.2f))
+            )
+
+            Spacer(Modifier.height(18.dp))
+
+            Box(
+                Modifier.fillMaxWidth(),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "✦",
+                    color = Color(0xFF00E5FF),
+                    fontSize = 12.sp,
+                    modifier = Modifier
+                        .align(Alignment.CenterStart)
+                        .padding(start = 8.dp, top = 24.dp)
+                )
+
+                Text(
+                    text = "✦",
+                    color = Color(0xFF00E5FF),
+                    fontSize = 16.sp,
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .padding(end = 8.dp, top = 18.dp)
+                )
+
+                Box(
+                    Modifier
+                        .size(176.dp, 46.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(Color(0xFF14242B)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(3.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        val baseHeights = remember {
+                            listOf(6f, 8f, 12f, 16f, 22f, 26f, 18f, 24f, 28f, 22f, 26f, 20f, 16f, 12f, 18f, 14f, 10f, 8f, 6f)
+                        }
+                        baseHeights.forEachIndexed { idx, bh ->
+                            val dynamicH = (bh * (0.55f + 0.45f * sin(phase + idx * 0.65f))).coerceIn(4f, 32f)
+                            Box(
+                                Modifier
+                                    .size(2.5.dp, dynamicH.dp)
+                                    .clip(RoundedCornerShape(1.25.dp))
+                                    .background(Color(0xFF00E5FF))
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(20.dp))
+
+            Text(
+                text = if (isTts) "Генерация озвучки..." else "Генерация субтитров...",
+                color = Color.White,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold,
+                textAlign = TextAlign.Center
+            )
+
+            Spacer(Modifier.height(4.dp))
+
+            Text(
+                text = "$percent%",
+                color = Color.White,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center
+            )
+
+            Spacer(Modifier.height(20.dp))
+
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(44.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color(0xFF383A44))
+                    .pressable(onClick = onCancel),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "Отмена",
+                    color = Color.White,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+        }
+    }
 }

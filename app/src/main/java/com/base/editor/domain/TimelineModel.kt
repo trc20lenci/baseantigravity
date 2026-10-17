@@ -107,7 +107,7 @@ class TimelineModel {
     fun trimStart(id: Long, newStartMs: Long): Boolean {
         val c = find(id) ?: return false
         if (c.row == 0) return trimMainStart(c, newStartMs)
-        val prevEnd = clips.filter { it.row == c.row && it.id != id && it.endMs <= c.startMs }.maxOfOrNull { it.endMs } ?: 0L
+        val prevEnd = clips.filter { it.row == c.row && it.id != id && it.startMs < c.startMs }.maxOfOrNull { it.endMs } ?: 0L
         val bounded = c.srcDurMs > 0
         var lo = prevEnd
         if (bounded) lo = max(lo, c.startMs - (c.srcInMs / c.speed).toLong())
@@ -121,7 +121,7 @@ class TimelineModel {
     fun trimEnd(id: Long, newEndMs: Long): Boolean {
         val c = find(id) ?: return false
         if (c.row == 0) return trimMainEnd(c, newEndMs)
-        val nextStart = clips.filter { it.row == c.row && it.id != id && it.startMs >= c.endMs }.minOfOrNull { it.startMs } ?: INF
+        val nextStart = clips.filter { it.row == c.row && it.id != id && (it.endMs > c.endMs || it.startMs >= c.startMs) }.minOfOrNull { it.startMs } ?: INF
         var hi = nextStart
         if (c.srcDurMs > 0) hi = min(hi, c.startMs + ((c.srcDurMs - c.srcInMs) / c.speed).toLong())
         val lo = c.startMs + MIN_CLIP_MS
@@ -166,18 +166,64 @@ class TimelineModel {
         return true
     }
 
+    /** Создает точную копию клипа. */
+    fun duplicateClip(id: Long): Long? {
+        val c = find(id) ?: return null
+        val newId = nextId++
+        val len = c.lengthMs
+        if (c.row == 0) {
+            val insertIdx = clips.indexOfFirst { it.id == id }
+            if (insertIdx < 0) return null
+            for (i in (insertIdx + 1) until clips.size) {
+                val other = clips[i]
+                if (other.row == 0) {
+                    clips[i] = other.copy(startMs = other.startMs + len, endMs = other.endMs + len)
+                }
+            }
+            val dup = c.copy(id = newId, startMs = c.endMs, endMs = c.endMs + len)
+            clips.add(insertIdx + 1, dup)
+        } else {
+            val rowClips = clips.filter { it.row == c.row }.sortedBy { it.startMs }
+            var candidateStart = c.endMs
+            for (other in rowClips) {
+                if (other.id == c.id) continue
+                if (candidateStart < other.endMs && candidateStart + len > other.startMs) {
+                    candidateStart = max(candidateStart, other.endMs)
+                }
+            }
+            val dup = c.copy(id = newId, startMs = candidateStart, endMs = candidateStart + len)
+            clips.add(dup)
+        }
+        transforms[c.id]?.let { transforms[newId] = it }
+        crops[c.id]?.let { crops[newId] = it }
+        chromas[c.id]?.let { chromas[newId] = it }
+        bgs[c.id]?.let { bgs[newId] = it }
+        keyframes[c.id]?.let { keys -> keyframes[newId] = keys.map { it.copy() } }
+        sanitize()
+        return newId
+    }
+
+    /** Обновляет URI источника клипа (например после реверса). */
+    fun setClipUri(id: Long, newUri: String): Boolean {
+        val c = find(id) ?: return false
+        replace(c.copy(uri = newUri))
+        return true
+    }
+
     // ───────── магнитная основная дорожка (Ripple Edit) ─────────
     private fun baseClip(id: Long): Clip? = gestureBase?.clips?.firstOrNull { it.id == id }
 
-    /** Подрезка слева: клип остаётся на месте, режется его начало, следующие клипы подтягиваются. */
+    /** Подрезка слева: ручка следует за пальцем (startMs меняется), на отпускании compactMain() делает ripple. */
     private fun trimMainStart(current: Clip, newStartMs: Long): Boolean {
         val base = baseClip(current.id)?.takeIf { it.row == 0 } ?: current
         val bounded = base.srcDurMs > 0
         val lo = if (bounded) -(base.srcInMs / base.speed).toLong() else -MAX_EXTEND_MS
         val hi = base.lengthMs - MIN_CLIP_MS
         val delta = (newStartMs - base.startMs).coerceIn(lo, max(lo, hi))
-        replace(base.copy(srcInMs = if (bounded) base.srcInMs + (delta * base.speed).toLong() else base.srcInMs, endMs = base.endMs - delta))
-        sanitize()
+        val newS = base.startMs + delta
+        val newSrcIn = if (bounded) base.srcInMs + (delta * base.speed).toLong() else base.srcInMs
+        replace(base.copy(startMs = newS, srcInMs = newSrcIn, endMs = base.endMs))
+        cleanTransitionsAndTransforms()
         return true
     }
 
@@ -413,6 +459,25 @@ class TimelineModel {
     private fun restore(s: TimelineState) {
         clips = s.clips.toMutableList(); transitions = s.transitions.toMutableList()
         transforms = s.transforms.toMutableMap(); keyframes = s.keyframes.toMutableMap(); crops = s.crops.toMutableMap(); chromas = s.chromas.toMutableMap(); bgs = s.bgs.toMutableMap()
+    }
+
+    fun compactMainAndSanitize() {
+        compactMain()
+        sanitize()
+    }
+
+    private fun cleanTransitionsAndTransforms() {
+        val ids = clips.map { it.id }.toSet()
+        transforms.keys.retainAll(ids)
+        keyframes.keys.retainAll(ids)
+        crops.keys.retainAll(ids)
+        chromas.keys.retainAll(ids)
+        bgs.keys.retainAll(ids)
+        transitions = transitions.mapNotNull { t ->
+            val l = find(t.leftId); val r = find(t.rightId)
+            if (l == null || r == null || l.row != 0 || r.row != 0 || l.endMs != r.startMs) null
+            else t.copy(durationMs = t.durationMs.coerceIn(MIN_TRANSITION_MS, max(MIN_TRANSITION_MS, r.lengthMs)))
+        }.toMutableList()
     }
 
     /** Убирает переходы, потерявшие стык, и зажимает длительность в [MIN_TRANSITION_MS, длина входящего клипа]. */

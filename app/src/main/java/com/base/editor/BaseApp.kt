@@ -99,7 +99,9 @@ fun BaseApp() {
                         onClose = { nav.popBackStack() },
                         onConfirm = { items ->
                             PickedMediaInbox.post(projectId, items)   // редактор заберёт и добавит клипы
-                            nav.popBackStack()
+                            if (nav.currentDestination?.route?.startsWith("picker_add") == true) {
+                                nav.popBackStack()
+                            }
                         },
                     )
                 }

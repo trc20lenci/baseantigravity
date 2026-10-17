@@ -1,10 +1,12 @@
 package com.base.editor.ui.editor
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.SurfaceTexture
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
+import android.opengl.GLUtils
 import android.opengl.Matrix
 import android.os.Handler
 import android.os.Looper
@@ -45,6 +47,9 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
     @Volatile private var canvasAspect = 9f / 16f
     @Volatile private var canvasBgColor = 0
     @Volatile private var isBlurBg = false
+    @Volatile private var isImageBg = false
+    @Volatile private var bgImageAspect = 1f
+    @Volatile private var pendingBgBitmap: Bitmap? = null
     @Volatile private var bufW = 720
     @Volatile private var bufH = 1280
 
@@ -53,6 +58,7 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
     @Volatile private var clearOnNextFrame = false
     @Volatile private var clearRequestedAt = 0L
     @Volatile private var blurRadiusVal = 1.0f
+
 
     init {
         setEGLContextClientVersion(2)
@@ -81,13 +87,20 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
         }
     }
 
-    fun setCanvasBackground(argb: Int?, isBlur: Boolean) {
+    fun setCanvasBackground(argb: Int?, isBlur: Boolean, isImage: Boolean = false) {
         val color = argb ?: 0
-        if (canvasBgColor != color || isBlurBg != isBlur) {
+        if (canvasBgColor != color || isBlurBg != isBlur || isImageBg != isImage) {
             canvasBgColor = color
             isBlurBg = isBlur
+            isImageBg = isImage
             requestRender()
         }
+    }
+
+    fun setCustomBackgroundImage(bitmap: android.graphics.Bitmap?) {
+        pendingBgBitmap = bitmap
+        isImageBg = bitmap != null
+        requestRender()
     }
 
     fun setBlurRadius(r: Float) {
@@ -99,25 +112,22 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
     }
 
     fun setCanvasBg(argb: Int) {
-        setCanvasBackground(argb, false)
+        setCanvasBackground(argb, false, false)
+    }
+
+    private var committedTransform: ClipTransform = ClipTransform()
+
+    fun setCommittedTransform(t: ClipTransform) {
+        if (committedTransform != t) {
+            committedTransform = t
+            requestRender()
+        }
     }
 
     fun setLive(baked: ClipTransform?, current: ClipTransform?) {
-        if (baked == null || current == null) {
-            if (liveBaked != null && liveCurrent != null) {
-                clearOnNextFrame = true
-                clearRequestedAt = System.currentTimeMillis()
-            } else if (!clearOnNextFrame) {
-                liveBaked = null
-                liveCurrent = null
-                requestRender()
-            }
-        } else {
-            clearOnNextFrame = false
-            liveBaked = baked
-            liveCurrent = current
-            requestRender()
-        }
+        liveBaked = baked
+        liveCurrent = current
+        requestRender()
     }
 
     fun setInteractiveTransform(tx: Float, ty: Float, scale: Float, rotDeg: Float) {
@@ -127,10 +137,12 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
     }
 
     fun clearLiveOnNextFrame() {
-        clearOnNextFrame = true
-        clearRequestedAt = System.currentTimeMillis()
+        liveBaked = null
+        liveCurrent = null
         requestRender()
     }
+
+
 
     private inner class Renderer : GLSurfaceView.Renderer {
         private var program = 0
@@ -148,13 +160,22 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
         private var uBlurTex = 0
         private var uCoverScale = 0
 
+        private var imgProgram = 0
+        private var aImgPos = 0
+        private var aImgUv = 0
+        private var uImgTex = 0
+        private var uImgScale = 0
+        private var bgTexId = 0
+        private var loadedBgBitmap: Bitmap? = null
+        private var bgImageAspect = 1f
+
         private var texId = 0
         private var st: SurfaceTexture? = null
         private var surface: Surface? = null
         private val frameReady = AtomicBoolean(false)
 
         // Преаллоцированные матрицы — Zero-Allocation в onDrawFrame
-        private val texMat = FloatArray(16)
+        private val texMat = FloatArray(16).apply { Matrix.setIdentityM(this, 0) }
         private val matCur = FloatArray(16)
         private val matBk = FloatArray(16)
         private val invBk = FloatArray(16)
@@ -209,6 +230,7 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
         override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
             program = link(VS, FS)
             blurProgram = link(BLUR_VS, BLUR_FS)
+            imgProgram = link(IMG_VS, IMG_FS)
             if (program == 0 || blurProgram == 0) {
                 Log.e("BaseGl", "Критическая ошибка: шейдерная программа не собрана!")
                 return
@@ -226,6 +248,13 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
             uBlurTex = GLES20.glGetUniformLocation(blurProgram, "uBlurTex")
             uCoverScale = GLES20.glGetUniformLocation(blurProgram, "uCoverScale")
 
+            if (imgProgram != 0) {
+                aImgPos = GLES20.glGetAttribLocation(imgProgram, "aImgPos")
+                aImgUv = GLES20.glGetAttribLocation(imgProgram, "aImgUv")
+                uImgTex = GLES20.glGetUniformLocation(imgProgram, "uImgTex")
+                uImgScale = GLES20.glGetUniformLocation(imgProgram, "uImgScale")
+            }
+
             val t = IntArray(1)
             GLES20.glGenTextures(1, t, 0)
             texId = t[0]
@@ -238,11 +267,11 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
             releaseSurface()
             val s = SurfaceTexture(texId)
             s.setDefaultBufferSize(bufW, bufH)
-            s.setOnFrameAvailableListener {
+            s.setOnFrameAvailableListener({
                 frameReady.set(true)
                 requestRender()
                 onFrameRendered?.invoke()
-            }
+            }, main)
             st = s
             surface = Surface(s)
             val out = surface
@@ -266,18 +295,6 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
                 }
             }
 
-            // Новый кадр плеера уже содержит зафиксированное положение — сбрасываем live-дельту без рывка
-            val nowMs = System.currentTimeMillis()
-            if (newFrame && clearOnNextFrame) {
-                clearOnNextFrame = false
-                liveBaked = null
-                liveCurrent = null
-            } else if (clearOnNextFrame && (nowMs - clearRequestedAt) > 1500L) {
-                clearOnNextFrame = false
-                liveBaked = null
-                liveCurrent = null
-            }
-
             // 1. Очистка всей области контейнера (letterbox/pillarbox полосы всегда чёрные)
             GLES20.glDisable(GLES20.GL_SCISSOR_TEST)
             GLES20.glViewport(0, 0, w, h)
@@ -285,7 +302,11 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
             if (s == null || program == 0) return
-            s.getTransformMatrix(texMat)
+            if (frames > 0) {
+                s.getTransformMatrix(texMat)
+            } else {
+                android.opengl.Matrix.setIdentityM(texMat, 0)
+            }
 
             // 2. Расчет Scissor-области под текущий aspect ratio холста
             val va = w.toFloat() / h
@@ -311,18 +332,59 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
             GLES20.glScissor(cx, cy, cw, ch)
             GLES20.glViewport(cx, cy, cw, ch)
 
-            // Расчет геометрии видеокадра с защитой от сплющивания при смене формата
-            val fa = frameAspect.coerceIn(0.05f, 20f)
-            val fw = if (fa >= ca) 1f else (fa / ca).coerceIn(0.01f, 1f)
-            val fh = if (fa >= ca) (ca / fa).coerceIn(0.01f, 1f) else 1f
-            posVideo.put(0, -fw); posVideo.put(1, -fh)
-            posVideo.put(2,  fw); posVideo.put(3, -fh)
-            posVideo.put(4, -fw); posVideo.put(5,  fh)
-            posVideo.put(6,  fw); posVideo.put(7,  fh)
+            // Видеокадр приведён к пропорциям холста шейдером BackgroundFitEffect
+            posVideo.put(0, -1f); posVideo.put(1, -1f)
+            posVideo.put(2,  1f); posVideo.put(3, -1f)
+            posVideo.put(4, -1f); posVideo.put(5,  1f)
+            posVideo.put(6,  1f); posVideo.put(7,  1f)
             posVideo.position(0)
 
-            // 4. Пасс 1: Фон холста (Размытое видео — статично на месте, или сплошной цвет/чёрный)
-            if (isBlurBg && blurProgram != 0) {
+            // Проверяем обновление фонового изображения
+            val newBmp = pendingBgBitmap
+            if (newBmp !== loadedBgBitmap) {
+                loadedBgBitmap = newBmp
+                if (bgTexId != 0) {
+                    val t = intArrayOf(bgTexId)
+                    GLES20.glDeleteTextures(1, t, 0)
+                    bgTexId = 0
+                }
+                if (newBmp != null && !newBmp.isRecycled) {
+                    val t = IntArray(1)
+                    GLES20.glGenTextures(1, t, 0)
+                    bgTexId = t[0]
+                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, bgTexId)
+                    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+                    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+                    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+                    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+                    GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, newBmp, 0)
+                    bgImageAspect = if (newBmp.height > 0) newBmp.width.toFloat() / newBmp.height else 1f
+                }
+            }
+
+            // 4. Пасс 1: Фон холста (Кастомное фото, размытое видео, или цвет)
+            if (isImageBg && bgTexId != 0 && imgProgram != 0) {
+                GLES20.glDisable(GLES20.GL_BLEND)
+                GLES20.glUseProgram(imgProgram)
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, bgTexId)
+                GLES20.glUniform1i(uImgTex, 0)
+
+                val ia = bgImageAspect.coerceIn(0.05f, 20f)
+                val scaleX = if (ia >= ca) (ca / ia).coerceIn(0.01f, 1f) else 1f
+                val scaleY = if (ia >= ca) 1f else (ia / ca).coerceIn(0.01f, 1f)
+                GLES20.glUniform2f(uImgScale, scaleX, scaleY)
+
+                GLES20.glEnableVertexAttribArray(aImgPos)
+                GLES20.glVertexAttribPointer(aImgPos, 2, GLES20.GL_FLOAT, false, 0, posDirect)
+                GLES20.glEnableVertexAttribArray(aImgUv)
+                GLES20.glVertexAttribPointer(aImgUv, 2, GLES20.GL_FLOAT, false, 0, uvs)
+
+                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+
+                GLES20.glDisableVertexAttribArray(aImgPos)
+                GLES20.glDisableVertexAttribArray(aImgUv)
+            } else if (isBlurBg && blurProgram != 0) {
                 GLES20.glDisable(GLES20.GL_BLEND)
                 GLES20.glUseProgram(blurProgram)
                 GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
@@ -331,9 +393,10 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
                 GLES20.glUniformMatrix4fv(uBlurTexMat, 1, false, texMat, 0)
                 GLES20.glUniform1f(uBlurRadius, blurRadiusVal)
 
-                val coverX = if (fa >= ca) (ca / fa).coerceIn(0.01f, 1f) else 1f
-                val coverY = if (fa < ca) (fa / ca).coerceIn(0.01f, 1f) else 1f
-                GLES20.glUniform2f(uCoverScale, coverX, coverY)
+                val fa = frameAspect.coerceIn(0.05f, 20f)
+                val scaleX = if (fa >= ca) (ca / fa).coerceIn(0.01f, 1f) else 1f
+                val scaleY = if (fa >= ca) 1f else (fa / ca).coerceIn(0.01f, 1f)
+                GLES20.glUniform2f(uCoverScale, scaleX, scaleY)
 
                 GLES20.glEnableVertexAttribArray(aBlurPos)
                 GLES20.glVertexAttribPointer(aBlurPos, 2, GLES20.GL_FLOAT, false, 0, posDirect)
@@ -358,23 +421,9 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
                 GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
             }
 
-            // 5. Построение MVP-матрицы с компенсацией Aspect Ratio при интерактивном жесте
-            val b = liveBaked
-            val c = liveCurrent
-            if (b != null && c != null) {
-                // Вычисляем дельту с компенсацией Aspect Ratio
-                buildAspectCompensatedMatrix(matCur, c, ca)
-                buildAspectCompensatedMatrix(matBk, b, ca)
-                if (Matrix.invertM(invBk, 0, matBk, 0)) {
-                    Matrix.multiplyMM(deltaMat, 0, matCur, 0, invBk, 0)
-                    System.arraycopy(deltaMat, 0, mvpMat, 0, 16)
-                } else {
-                    Matrix.setIdentityM(mvpMat, 0)
-                }
-            } else {
-                // Нет жеста: кадр спозиционирован
-                Matrix.setIdentityM(mvpMat, 0)
-            }
+            // 5. Построение MVP-матрицы с компенсацией Aspect Ratio (жест или сохранённое положение)
+            val activeT = liveCurrent ?: committedTransform
+            buildAspectCompensatedMatrix(mvpMat, activeT, ca)
 
             // 6. Пасс 2: Отрисовка видеокадра холста поверх фона с сохранением правильных пропорций
             GLES20.glEnable(GLES20.GL_BLEND)
@@ -423,7 +472,8 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
         }
 
         fun applyBufferSize() {
-            runCatching { st?.setDefaultBufferSize(bufW, bufH) }
+            st?.setDefaultBufferSize(bufW, bufH)
+            requestRender()
         }
 
         private fun releaseSurface() {
@@ -493,7 +543,11 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
             varying vec2 vUv;
             uniform samplerExternalOES uTex;
             void main() {
-                gl_FragColor = texture2D(uTex, vUv);
+                vec4 col = texture2D(uTex, vUv);
+                if (col.a < 0.01) {
+                    discard;
+                }
+                gl_FragColor = col;
             }
         """
 
@@ -518,12 +572,39 @@ class PreviewGlView(context: Context) : GLSurfaceView(context) {
             void main() {
                 vec2 centeredUv = (vUv - 0.5) * uCoverScale + 0.5;
                 vec2 off = vec2(0.007, 0.007) * uBlurRadius;
-                vec4 acc = texture2D(uBlurTex, (uBlurTexMat * vec4(centeredUv, 0.0, 1.0)).xy) * 0.36;
-                acc += texture2D(uBlurTex, (uBlurTexMat * vec4(centeredUv + off, 0.0, 1.0)).xy) * 0.16;
-                acc += texture2D(uBlurTex, (uBlurTexMat * vec4(centeredUv - off, 0.0, 1.0)).xy) * 0.16;
-                acc += texture2D(uBlurTex, (uBlurTexMat * vec4(centeredUv + vec2(-off.x, off.y), 0.0, 1.0)).xy) * 0.16;
-                acc += texture2D(uBlurTex, (uBlurTexMat * vec4(centeredUv + vec2(off.x, -off.y), 0.0, 1.0)).xy) * 0.16;
+                vec2 off2 = off * 1.8;
+                vec4 acc = texture2D(uBlurTex, (uBlurTexMat * vec4(centeredUv, 0.0, 1.0)).xy) * 0.28;
+                acc += texture2D(uBlurTex, (uBlurTexMat * vec4(centeredUv + off, 0.0, 1.0)).xy) * 0.13;
+                acc += texture2D(uBlurTex, (uBlurTexMat * vec4(centeredUv - off, 0.0, 1.0)).xy) * 0.13;
+                acc += texture2D(uBlurTex, (uBlurTexMat * vec4(centeredUv + vec2(-off.x, off.y), 0.0, 1.0)).xy) * 0.13;
+                acc += texture2D(uBlurTex, (uBlurTexMat * vec4(centeredUv + vec2(off.x, -off.y), 0.0, 1.0)).xy) * 0.13;
+                acc += texture2D(uBlurTex, (uBlurTexMat * vec4(centeredUv + off2, 0.0, 1.0)).xy) * 0.05;
+                acc += texture2D(uBlurTex, (uBlurTexMat * vec4(centeredUv - off2, 0.0, 1.0)).xy) * 0.05;
+                acc += texture2D(uBlurTex, (uBlurTexMat * vec4(centeredUv + vec2(-off2.x, off2.y), 0.0, 1.0)).xy) * 0.05;
+                acc += texture2D(uBlurTex, (uBlurTexMat * vec4(centeredUv + vec2(off2.x, -off2.y), 0.0, 1.0)).xy) * 0.05;
                 gl_FragColor = vec4(acc.rgb * 0.70, 1.0);
+            }
+        """
+
+        const val IMG_VS = """
+            attribute vec4 aImgPos;
+            attribute vec2 aImgUv;
+            varying vec2 vImgUv;
+            void main() {
+                gl_Position = aImgPos;
+                vImgUv = aImgUv;
+            }
+        """
+
+        const val IMG_FS = """
+            precision mediump float;
+            varying vec2 vImgUv;
+            uniform sampler2D uImgTex;
+            uniform vec2 uImgScale;
+            void main() {
+                vec2 centeredUv = (vImgUv - 0.5) * uImgScale + 0.5;
+                centeredUv.y = 1.0 - centeredUv.y;
+                gl_FragColor = texture2D(uImgTex, centeredUv);
             }
         """
     }

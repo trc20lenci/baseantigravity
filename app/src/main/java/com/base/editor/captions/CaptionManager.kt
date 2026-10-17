@@ -106,9 +106,36 @@ class CaptionManager(
     fun updateText(id: String, text: String) = edit(id) { CaptionOps.retext(it, text) }
     fun updateTiming(id: String, startMs: Long, endMs: Long) = edit(id) { CaptionOps.retime(it, startMs, endMs) }
     /** Перетаскивание карточки по шкале (долгое нажатие на таймлайне). */
-    fun moveTo(id: String, startMs: Long) = edit(id) { CaptionOps.shift(it, startMs) }
+    fun moveTo(id: String, startMs: Long) = edit(id) { item ->
+        val others = _items.value.filter { it.id != id }.sortedBy { it.startMs }
+        val len = item.endMs - item.startMs
+        val desired = startMs.coerceAtLeast(0L)
+        var result = -1L
+        var dist = Long.MAX_VALUE
+        var gapLo = 0L
+        fun consider(lo: Long, hi: Long) {
+            if (hi - lo < len) return
+            val cand = desired.coerceIn(lo, hi - len)
+            val d = kotlin.math.abs(cand - desired)
+            if (d < dist) { dist = d; result = cand }
+        }
+        others.forEach {
+            consider(gapLo, it.startMs)
+            gapLo = maxOf(gapLo, it.endMs)
+        }
+        consider(gapLo, Long.MAX_VALUE / 2)
+        val finalStart = if (result >= 0) result else desired
+        CaptionOps.shift(item, finalStart)
+    }
 
-    fun trim(id: String, startMs: Long, endMs: Long) = edit(id) { CaptionOps.trim(it, startMs, endMs) }
+    fun trim(id: String, startMs: Long, endMs: Long) = edit(id) { item ->
+        val others = _items.value.filter { it.id != id }
+        val prevEnd = others.filter { it.startMs < item.startMs }.maxOfOrNull { it.endMs } ?: 0L
+        val nextStart = others.filter { it.startMs >= item.startMs }.minOfOrNull { it.startMs } ?: Long.MAX_VALUE
+        val s0 = startMs.coerceIn(prevEnd, (item.endMs - CaptionOps.MIN_DURATION_MS).coerceAtLeast(prevEnd))
+        val e0 = endMs.coerceIn(s0 + CaptionOps.MIN_DURATION_MS, nextStart)
+        CaptionOps.trim(item, s0, e0)
+    }
 
     /** «Разделить» по курсору. false — курсор вне карточки или слишком близко к краю. */
     fun split(id: String, atMs: Long): Boolean {

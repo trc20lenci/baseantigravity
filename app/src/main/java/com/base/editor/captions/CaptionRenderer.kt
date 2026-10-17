@@ -121,7 +121,7 @@ object CaptionRenderer {
 
     private fun DrawScope.layout(measurer: TextMeasurer, item: CaptionItem, style: CaptionStyle, fontPx: Float, maxW: Float): MutableList<Line> {
         val base = TextStyle(
-            fontFamily = CaptionFonts.family(style.font, style.fontWeight, style.italic),
+            fontFamily = com.base.editor.text.TextFonts.family(style.fontId),
             fontSize = fontPx.toSp(),
             letterSpacing = (style.letterSpacingEm * fontPx).toSp(),
         )

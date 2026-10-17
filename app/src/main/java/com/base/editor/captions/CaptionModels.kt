@@ -35,9 +35,10 @@ enum class WordAnimation(val label: String) {
  * Цвета — ARGB (Int).
  */
 data class CaptionStyle(
-    val id: String = "yellow",
-    val name: String = "Жёлтый",
+    val id: String = "neon_yellow",
+    val name: String = "Неон Жёлтый",
     val font: CaptionFont = CaptionFont.MONTSERRAT,
+    val fontId: String = "MONTSERRAT",
     val fontWeight: Int = 900,
     val italic: Boolean = false,
     val uppercase: Boolean = true,

@@ -77,6 +77,7 @@ fun MediaPickerScreen(startOnPhotos: Boolean, onClose: () -> Unit, onConfirm: (L
     var items by remember { mutableStateOf<List<DeviceMedia>>(emptyList()) }
     LaunchedEffect(granted, tab) { if (granted) items = MediaRepository.query(ctx, video = tab == 0) }
     val selected = remember { mutableStateListOf<DeviceMedia>() }   // порядок выбора = порядок на таймлайне
+    var confirming by remember { mutableStateOf(false) }
 
     Column(Modifier.fillMaxSize().background(BaseColors.DarkBg).statusBarsPadding().navigationBarsPadding()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -107,8 +108,13 @@ fun MediaPickerScreen(startOnPhotos: Boolean, onClose: () -> Unit, onConfirm: (L
         }
         Row(Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.End) {
             Button(
-                onClick = { onConfirm(selected.map { PickedMedia(it.uri.toString(), it.type, it.durationMs) }) },
-                enabled = selected.isNotEmpty(), shape = RoundedCornerShape(12.dp),
+                onClick = {
+                    if (!confirming) {
+                        confirming = true
+                        onConfirm(selected.map { PickedMedia(it.uri.toString(), it.type, it.durationMs) })
+                    }
+                },
+                enabled = selected.isNotEmpty() && !confirming, shape = RoundedCornerShape(12.dp),
                 colors = ButtonDefaults.buttonColors(BaseColors.Primary, Color.Black, BaseColors.DarkSlot, Color.White.copy(alpha = .4f)),
             ) { Text(if (selected.isEmpty()) "Добавить" else "Добавить (${selected.size})", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp)) }
         }

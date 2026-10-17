@@ -1,7 +1,7 @@
 package com.base.editor.ui.editor
 
-import androidx.compose.animation.core.animateDecay
-import androidx.compose.animation.core.FloatExponentialDecaySpec
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.splineBasedDecay
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -24,6 +24,7 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
@@ -58,6 +59,7 @@ import com.base.editor.ui.theme.haptic
 import com.base.editor.ui.theme.Haptic
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.max
@@ -84,7 +86,10 @@ fun TimelineView(
     var widthPx by remember { mutableIntStateOf(0) }
     var tick by remember { mutableIntStateOf(0) }          // перерисовка после подгрузки миниатюр
 
-    val geo = Geo(density, widthPx.toFloat(), playheadMs, pxPerSecDp)
+    val hasOverlay = clips.any { it.row == 2 && it.type != MediaType.AUDIO }
+    val hasText = texts.isNotEmpty()
+    val hasCaptions = captions.isNotEmpty()
+    val geo = Geo(density, widthPx.toFloat(), playheadMs, pxPerSecDp, hasOverlay, hasText, hasCaptions)
     val cur by rememberUpdatedState(TlState(geo, clips, transitions, captions, texts, keyframes, selectedId, selectedTextId, selectedCaptionId, totalMs))
     val act by rememberUpdatedState(actions)
 
@@ -140,12 +145,46 @@ fun TimelineView(
                                 else -> null
                             } ?: return@awaitEachGesture
                             val x0 = pressed.position.x
-                            while (true) {
-                                val ch = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
-                                if (!ch.pressed) break
-                                val newStart = (baseStart + ((ch.position.x - x0) / cur.geo.pxPerMs).toLong()).coerceAtLeast(0L)
-                                if (hit is Hit.Text) act.moveText(hit.id, newStart) else if (hit is Hit.Caption) act.moveCaption(hit.id, newStart)
-                                ch.consume()
+                            val edgeThreshold = with(density) { 48.dp.toPx() }
+                            var lpAutoScrollMs = 0L
+                            var lpPointerX = pressed.position.x
+                            var lpRatio = 0f
+                            var lpJob: Job? = null
+                            try {
+                                while (true) {
+                                    val ch = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
+                                    if (!ch.pressed) break
+                                    lpPointerX = ch.position.x
+                                    val r = when {
+                                        widthPx > 0 && lpPointerX < edgeThreshold -> -((edgeThreshold - lpPointerX) / edgeThreshold).coerceIn(0f, 1f)
+                                        widthPx > 0 && lpPointerX > widthPx - edgeThreshold -> ((lpPointerX - (widthPx - edgeThreshold)) / edgeThreshold).coerceIn(0f, 1f)
+                                        else -> 0f
+                                    }
+                                    lpRatio = r
+                                    if (abs(r) > 0.05f && (lpJob == null || lpJob?.isActive != true)) {
+                                        lpJob = scope.launch {
+                                            while (isActive) {
+                                                delay(16)
+                                                if (abs(lpRatio) > 0.05f) {
+                                                    val stepMs = (lpRatio * 1800f * 0.016f).toLong()
+                                                    if (stepMs != 0L) {
+                                                        lpAutoScrollMs += stepMs
+                                                        val newStart = (baseStart + ((lpPointerX - x0) / cur.geo.pxPerMs).toLong() + lpAutoScrollMs).coerceAtLeast(0L)
+                                                        if (hit is Hit.Text) act.moveText(hit.id, newStart) else if (hit is Hit.Caption) act.moveCaption(hit.id, newStart)
+                                                        act.scrubTo(newStart)
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } else if (abs(r) <= 0.05f) {
+                                        lpJob?.cancel(); lpJob = null
+                                    }
+                                    val newStart = (baseStart + ((ch.position.x - x0) / cur.geo.pxPerMs).toLong() + lpAutoScrollMs).coerceAtLeast(0L)
+                                    if (hit is Hit.Text) act.moveText(hit.id, newStart) else if (hit is Hit.Caption) act.moveCaption(hit.id, newStart)
+                                    ch.consume()
+                                }
+                            } finally {
+                                lpJob?.cancel()
                             }
                             return@awaitEachGesture
                         }
@@ -160,72 +199,165 @@ fun TimelineView(
                     val tracker = VelocityTracker().also { it.addPosition(down.uptimeMillis, down.position) }
                     var activeId: PointerId = down.id
 
-                    while (true) {
-                        val ev = awaitPointerEvent()
-                        val pressed = ev.changes.filter { it.pressed }
-                        if (pressed.isEmpty()) break
-                        if (pressed.size >= 2) {                                   // зум
-                            val dist = (pressed[0].position - pressed[1].position).getDistance()
-                            if (mode != Mode.ZOOM) { mode = Mode.ZOOM; pinchLast = dist; act.scrubStart() }
-                            else if (pinchLast > 0f && dist > 0f) { act.setZoom(cur.geo.pxPerSecDp * dist / pinchLast); pinchLast = dist }
-                            ev.changes.forEach { it.consume() }
-                            continue
-                        }
-                        val ch = ev.changes.firstOrNull { it.id == activeId } ?: pressed[0].also { activeId = it.id }
-                        if (mode == Mode.ZOOM) { ch.consume(); continue }
-                        tracker.addPosition(ch.uptimeMillis, ch.position)
-                        val total = ch.position - down.position
-                        val g = cur.geo
+                    val edgeThreshold = with(density) { 48.dp.toPx() }
+                    var autoScrollMs = 0L
+                    var lastPointerX = down.position.x
+                    var edgeRatio = 0f
+                    var edgeJob: Job? = null
 
-                        if (mode == Mode.PENDING && abs(total.x) > slop) {
-                            mode = when (hit) {
-                                is Hit.Handle -> if (hit.start) Mode.TRIM_START else Mode.TRIM_END
-                                is Hit.TextHandle -> if (hit.start) Mode.TRIM_T_START else Mode.TRIM_T_END
-                                is Hit.CaptionHandle -> if (hit.start) Mode.TRIM_C_START else Mode.TRIM_C_END
-                                is Hit.Body -> if (hit.clip.id == s0.selectedId) Mode.MOVE else Mode.SCROLL
-                                else -> Mode.SCROLL
+                    fun updateEdgeScroll() {
+                        val r = when {
+                            widthPx > 0 && lastPointerX < edgeThreshold -> -((edgeThreshold - lastPointerX) / edgeThreshold).coerceIn(0f, 1f)
+                            widthPx > 0 && lastPointerX > widthPx - edgeThreshold -> ((lastPointerX - (widthPx - edgeThreshold)) / edgeThreshold).coerceIn(0f, 1f)
+                            else -> 0f
+                        }
+                        edgeRatio = r
+                        if (abs(r) > 0.05f && (edgeJob == null || edgeJob?.isActive != true)) {
+                            edgeJob = scope.launch {
+                                while (isActive) {
+                                    delay(16)
+                                    if (abs(edgeRatio) > 0.05f) {
+                                        val stepMs = (edgeRatio * 1800f * 0.016f).toLong()
+                                        if (stepMs != 0L) {
+                                            autoScrollMs += stepMs
+                                            ph = (ph + stepMs).coerceIn(0.0, (cur.totalMs + 3000L).toDouble())
+                                            act.scrubTo(ph.toLong())
+                                            val currentDMs = (((lastPointerX - down.position.x) / cur.geo.pxPerMs).toLong() + autoScrollMs)
+                                            when (mode) {
+                                                Mode.MOVE -> startClip?.let { act.moveClip(it.id, it.startMs + currentDMs) }
+                                                Mode.TRIM_START -> startClip?.let {
+                                                    val target = (it.startMs + currentDMs).coerceAtLeast(0L)
+                                                    act.trimStart(it.id, target)
+                                                    act.scrubTo(target)
+                                                }
+                                                Mode.TRIM_END -> startClip?.let {
+                                                    val target = (it.endMs + currentDMs).coerceAtLeast(0L)
+                                                    act.trimEnd(it.id, target)
+                                                    act.scrubTo(target)
+                                                }
+                                                Mode.TRIM_T_START -> (hit as? Hit.TextHandle)?.let { act.trimText(it.id, baseS + currentDMs, baseE) }
+                                                Mode.TRIM_T_END -> (hit as? Hit.TextHandle)?.let { act.trimText(it.id, baseS, baseE + currentDMs) }
+                                                Mode.TRIM_C_START -> (hit as? Hit.CaptionHandle)?.let { act.trimCaption(it.id, baseS + currentDMs, baseE) }
+                                                Mode.TRIM_C_END -> (hit as? Hit.CaptionHandle)?.let { act.trimCaption(it.id, baseS, baseE + currentDMs) }
+                                                else -> Unit
+                                            }
+                                        }
+                                    }
+                                }
                             }
-                            if (mode != Mode.SCROLL) view.haptic(Haptic.LIGHT)               // схватили блок/ручку
+                        } else if (abs(r) <= 0.05f) {
+                            edgeJob?.cancel(); edgeJob = null
+                        }
+                    }
+
+                    try {
+                        while (true) {
+                            val ev = awaitPointerEvent()
+                            val pressed = ev.changes.filter { it.pressed }
+                            if (pressed.isEmpty()) {
+                                ev.changes.firstOrNull { it.id == activeId }?.let {
+                                    tracker.addPosition(it.uptimeMillis, it.position)
+                                }
+                                break
+                            }
+                            if (pressed.size >= 2) {                                   // зум
+                                val dist = (pressed[0].position - pressed[1].position).getDistance()
+                                if (mode != Mode.ZOOM) { mode = Mode.ZOOM; pinchLast = dist; act.scrubStart() }
+                                else if (pinchLast > 0f && dist > 0f) { act.setZoom(cur.geo.pxPerSecDp * dist / pinchLast); pinchLast = dist }
+                                ev.changes.forEach { it.consume() }
+                                continue
+                            }
+                            val ch = ev.changes.firstOrNull { it.id == activeId } ?: pressed[0].also { activeId = it.id }
+                            if (mode == Mode.ZOOM) { ch.consume(); continue }
+                            tracker.addPosition(ch.uptimeMillis, ch.position)
+                            lastPointerX = ch.position.x
+                            val total = ch.position - down.position
+                            val g = cur.geo
+
+                            if (mode == Mode.PENDING && abs(total.x) > slop) {
+                                mode = when (hit) {
+                                    is Hit.Handle -> if (hit.start) Mode.TRIM_START else Mode.TRIM_END
+                                    is Hit.TextHandle -> if (hit.start) Mode.TRIM_T_START else Mode.TRIM_T_END
+                                    is Hit.CaptionHandle -> if (hit.start) Mode.TRIM_C_START else Mode.TRIM_C_END
+                                    is Hit.Body -> if (hit.clip.id == s0.selectedId && hit.clip.row != 0) Mode.MOVE else Mode.SCROLL
+                                    else -> Mode.SCROLL
+                                }
+                                if (mode != Mode.SCROLL) view.haptic(Haptic.LIGHT)               // схватили блок/ручку
+                                when (mode) {
+                                    Mode.SCROLL -> act.scrubStart()
+                                    Mode.TRIM_T_START, Mode.TRIM_T_END -> s0.texts.firstOrNull { it.id == (hit as Hit.TextHandle).id }?.let { baseS = it.startMs; baseE = it.endMs }
+                                    Mode.TRIM_C_START, Mode.TRIM_C_END -> s0.captions.firstOrNull { it.id == (hit as Hit.CaptionHandle).id }?.let { baseS = it.startMs; baseE = it.endMs }
+                                    else -> { startClip = (hit as? Hit.Body)?.clip ?: (hit as Hit.Handle).clip; act.editBegin() }
+                                }
+                            }
+                            if (mode == Mode.PENDING) continue
+
+                            val dMs = (total.x / g.pxPerMs).toLong() + autoScrollMs
                             when (mode) {
-                                Mode.SCROLL -> act.scrubStart()
-                                Mode.TRIM_T_START, Mode.TRIM_T_END -> s0.texts.firstOrNull { it.id == (hit as Hit.TextHandle).id }?.let { baseS = it.startMs; baseE = it.endMs }
-                                Mode.TRIM_C_START, Mode.TRIM_C_END -> s0.captions.firstOrNull { it.id == (hit as Hit.CaptionHandle).id }?.let { baseS = it.startMs; baseE = it.endMs }
-                                else -> { startClip = (hit as? Hit.Body)?.clip ?: (hit as Hit.Handle).clip; act.editBegin() }
+                                Mode.SCROLL -> {
+                                    ph = (ph - (ch.position.x - ch.previousPosition.x) * 1.2f / g.pxPerMs).coerceIn(0.0, cur.totalMs.toDouble())
+                                    act.scrubTo(ph.toLong())
+                                }
+                                Mode.MOVE -> {
+                                    act.moveClip(startClip!!.id, startClip.startMs + dMs)
+                                    updateEdgeScroll()
+                                }
+                                Mode.TRIM_START -> {
+                                    val target = (startClip!!.startMs + dMs).coerceAtLeast(0L)
+                                    act.trimStart(startClip.id, target)
+                                    act.scrubTo(target)
+                                    updateEdgeScroll()
+                                }
+                                Mode.TRIM_END -> {
+                                    val target = (startClip!!.endMs + dMs).coerceAtLeast(0L)
+                                    act.trimEnd(startClip.id, target)
+                                    act.scrubTo(target)
+                                    updateEdgeScroll()
+                                }
+                                Mode.TRIM_T_START -> {
+                                    act.trimText((hit as Hit.TextHandle).id, baseS + dMs, baseE)
+                                    updateEdgeScroll()
+                                }
+                                Mode.TRIM_T_END -> {
+                                    act.trimText((hit as Hit.TextHandle).id, baseS, baseE + dMs)
+                                    updateEdgeScroll()
+                                }
+                                Mode.TRIM_C_START -> {
+                                    act.trimCaption((hit as Hit.CaptionHandle).id, baseS + dMs, baseE)
+                                    updateEdgeScroll()
+                                }
+                                Mode.TRIM_C_END -> {
+                                    act.trimCaption((hit as Hit.CaptionHandle).id, baseS, baseE + dMs)
+                                    updateEdgeScroll()
+                                }
+                                else -> Unit
                             }
+                            ch.consume()
                         }
-                        if (mode == Mode.PENDING) continue
-                        val dMs = (total.x / g.pxPerMs).toLong()
-                        when (mode) {
-                            Mode.SCROLL -> {
-                                ph = (ph - (ch.position.x - ch.previousPosition.x) / g.pxPerMs).coerceIn(0.0, cur.totalMs.toDouble())
-                                act.scrubTo(ph.toLong())
-                            }
-                            Mode.MOVE -> act.moveClip(startClip!!.id, startClip.startMs + dMs)
-                            Mode.TRIM_START -> act.trimStart(startClip!!.id, startClip.startMs + dMs)
-                            Mode.TRIM_END -> act.trimEnd(startClip!!.id, startClip.endMs + dMs)
-                            Mode.TRIM_T_START -> act.trimText((hit as Hit.TextHandle).id, baseS + dMs, baseE)
-                            Mode.TRIM_T_END -> act.trimText((hit as Hit.TextHandle).id, baseS, baseE + dMs)
-                            Mode.TRIM_C_START -> act.trimCaption((hit as Hit.CaptionHandle).id, baseS + dMs, baseE)
-                            Mode.TRIM_C_END -> act.trimCaption((hit as Hit.CaptionHandle).id, baseS, baseE + dMs)
-                            else -> Unit
-                        }
-                        ch.consume()
+                    } finally {
+                        edgeJob?.cancel()
                     }
 
                     when (mode) {
                         Mode.PENDING -> tap(hit)                                    // тап
-                        Mode.SCROLL -> {                                            // инерция
-                            val vMs = -tracker.calculateVelocity().x / cur.geo.pxPerMs
+                        Mode.SCROLL -> {                                            // инерция ("разброс")
+                            val rawVx = -tracker.calculateVelocity().x
+                            val vMs = (rawVx * 1.6f) / cur.geo.pxPerMs
                             flingRef[0] = scope.launch {
                                 try {
-                                    animateDecay(ph.toFloat(), vMs.toFloat(), FloatExponentialDecaySpec(frictionMultiplier = 0.8f)) { v, _ ->
-                                        ph = v.toDouble().coerceIn(0.0, cur.totalMs.toDouble())
+                                    val anim = Animatable(ph.toFloat())
+                                    val decay = splineBasedDecay<Float>(density)
+                                    anim.animateDecay(vMs, decay) {
+                                        ph = value.toDouble().coerceIn(0.0, cur.totalMs.toDouble())
                                         act.scrubTo(ph.toLong())
                                     }
                                 } finally { act.scrubEnd() }       // последняя позиция — в плеер без задержки (в т.ч. при остановке касанием)
                             }
                         }
-                        Mode.MOVE, Mode.TRIM_START, Mode.TRIM_END -> act.editEnd()
+                        Mode.MOVE, Mode.TRIM_START, Mode.TRIM_END -> {
+                            act.editEnd()
+                            act.scrubEnd()
+                        }
                         Mode.ZOOM, Mode.TRIM_T_START, Mode.TRIM_T_END, Mode.TRIM_C_START, Mode.TRIM_C_END -> Unit
                     }
                 }
@@ -239,8 +371,8 @@ fun TimelineView(
 
 // ───────────────────────── геометрия и хит-тест ─────────────────────────
 
-/** Высота таймлайна фиксирована: экран не «прыгает» при появлении дорожек. */
-const val TL_HEIGHT_DP = 270
+/** Высота таймлайна фиксирована: компактный вид без пустых дыр. */
+const val TL_HEIGHT_DP = 280
 private enum class Mode { PENDING, SCROLL, MOVE, TRIM_START, TRIM_END, ZOOM, TRIM_T_START, TRIM_T_END, TRIM_C_START, TRIM_C_END }
 private class ThumbReq(val key: String, val uri: String, val type: MediaType, val bucketMs: Long, val h: Int)
 
@@ -259,19 +391,27 @@ private sealed interface Hit {
 }
 
 /** Всё в пикселях. x(t) = центр + (t − playhead)·pxPerMs. */
-class Geo(private val d: Density, val width: Float, val playheadMs: Long, val pxPerSecDp: Float) {
+class Geo(
+    private val d: Density,
+    val width: Float,
+    val playheadMs: Long,
+    val pxPerSecDp: Float,
+    val hasOverlay: Boolean = false,
+    val hasText: Boolean = false,
+    val hasCaptions: Boolean = false,
+) {
     val pxPerMs = with(d) { pxPerSecDp.dp.toPx() } / 1000f
     val centerX = width / 2f
     fun x(t: Long) = centerX + (t - playheadMs) * pxPerMs
-    private fun dp(v: Int) = with(d) { v.dp.toPx() }
-    val rulerH = dp(28); val mainTop = dp(36); val mainH = dp(64)
-    val slotH = dp(36)
-    val overlayTop = mainTop + mainH + dp(8)          // наложения: фото/видео поверх основного
-    val textTop = overlayTop + slotH + dp(4)          // дорожка «Текст»
-    val capTop = textTop + slotH + dp(4)              // дорожка субтитров
-    val audioTop = capTop + slotH + dp(4)             // музыка и озвучка
-    val junctionR = dp(15); val handleW = dp(14); val handleSlop = dp(14); val corner = dp(8)
-    val total: Float get() = audioTop + slotH
+    fun dp(v: Int) = with(d) { v.dp.toPx() }
+    val rulerH = dp(24); val mainTop = dp(26); val mainH = dp(70)
+    val slotH = dp(44); val gap = dp(4)
+    val overlayTop = mainTop + mainH + gap
+    val textTop = if (hasOverlay) overlayTop + slotH + gap else mainTop + mainH + gap
+    val capTop = textTop + slotH + gap
+    val audioTop = if (hasCaptions) capTop + slotH + gap else textTop + slotH + gap
+    val junctionR = dp(14); val handleW = dp(16); val handleSlop = dp(14); val corner = dp(5)
+    val total: Float get() = audioTop + slotH + dp(8)
 }
 
 private class TlState(
@@ -306,7 +446,7 @@ private class TlState(
                 if (p.x in l..r) return Hit.Body(c)
             }
         }
-        if (p.y in g.overlayTop..(g.overlayTop + g.slotH)) {
+        if (overlayClips.isNotEmpty() && p.y in g.overlayTop..(g.overlayTop + g.slotH)) {
             overlayClips.forEach { c ->
                 val l = g.x(c.startMs); val r = g.x(c.endMs)
                 if (c.id == selectedId) {
@@ -316,36 +456,45 @@ private class TlState(
                 }
                 if (p.x in l..r) return Hit.Body(c)
             }
-            if (p.x >= g.x(0)) return Hit.OverlaySlot
-        }
-        if (p.y in g.audioTop..(g.audioTop + g.slotH)) {
-            audioClips.forEach { c ->
-                val l = g.x(c.startMs); val r = g.x(c.endMs)
-                if (c.id == selectedId) {
-                    val hw = min(g.handleW, (r - l) / 4)
-                    if (p.x in (l - g.handleSlop)..(l + hw + g.handleSlop / 2)) return Hit.Handle(c, true)
-                    if (p.x in (r - hw - g.handleSlop / 2)..(r + g.handleSlop)) return Hit.Handle(c, false)
-                }
-                if (p.x in l..r) return Hit.Body(c)
-            }
-            if (p.x >= g.x(0)) return Hit.AudioSlot
+            val btnLeft = max(g.x(0), 0f)
+            if (p.x in btnLeft..(btnLeft + g.dp(180))) return Hit.OverlaySlot
         }
         if (p.y in g.textTop..(g.textTop + g.slotH)) {
-            texts.firstOrNull { it.id == selectedTextId }?.let { t ->
-                val l = g.x(t.startMs); val r = g.x(t.endMs); val hw = min(g.handleW, (r - l) / 4)
-                if (p.x in (l - g.handleSlop)..(l + hw + g.handleSlop / 2)) return Hit.TextHandle(t.id, true)
-                if (p.x in (r - hw - g.handleSlop / 2)..(r + g.handleSlop)) return Hit.TextHandle(t.id, false)
+            if (texts.isNotEmpty()) {
+                texts.firstOrNull { it.id == selectedTextId }?.let { t ->
+                    val l = g.x(t.startMs); val r = g.x(t.endMs); val hw = min(g.handleW, (r - l) / 4)
+                    if (p.x in (l - g.handleSlop)..(l + hw + g.handleSlop / 2)) return Hit.TextHandle(t.id, true)
+                    if (p.x in (r - hw - g.handleSlop / 2)..(r + g.handleSlop)) return Hit.TextHandle(t.id, false)
+                }
+                texts.lastOrNull { p.x in g.x(it.startMs)..g.x(it.endMs) }?.let { return Hit.Text(it.id) }
+            } else {
+                val btnLeft = max(g.x(0), 0f)
+                if (p.x in btnLeft..(btnLeft + g.dp(180))) return Hit.TextSlot
             }
-            texts.lastOrNull { p.x in g.x(it.startMs)..g.x(it.endMs) }?.let { return Hit.Text(it.id) }
-            if (p.x >= g.x(0)) return Hit.TextSlot
         }
-        if (p.y in g.capTop..(g.capTop + g.slotH)) {
+        if (captions.isNotEmpty() && p.y in g.capTop..(g.capTop + g.slotH)) {
             captions.firstOrNull { it.id == selectedCaptionId }?.let { c ->
                 val l = g.x(c.startMs); val r = g.x(c.endMs); val hw = min(g.handleW, (r - l) / 4)
                 if (p.x in (l - g.handleSlop)..(l + hw + g.handleSlop / 2)) return Hit.CaptionHandle(c.id, true)
                 if (p.x in (r - hw - g.handleSlop / 2)..(r + g.handleSlop)) return Hit.CaptionHandle(c.id, false)
             }
             captions.firstOrNull { p.x in g.x(it.startMs)..g.x(it.endMs) }?.let { return Hit.Caption(it.id) }
+        }
+        if (p.y in g.audioTop..(g.audioTop + g.slotH)) {
+            if (audioClips.isNotEmpty()) {
+                audioClips.forEach { c ->
+                    val l = g.x(c.startMs); val r = g.x(c.endMs)
+                    if (c.id == selectedId) {
+                        val hw = min(g.handleW, (r - l) / 4)
+                        if (p.x in (l - g.handleSlop)..(l + hw + g.handleSlop / 2)) return Hit.Handle(c, true)
+                        if (p.x in (r - hw - g.handleSlop / 2)..(r + g.handleSlop)) return Hit.Handle(c, false)
+                    }
+                    if (p.x in l..r) return Hit.Body(c)
+                }
+            } else {
+                val btnLeft = max(g.x(0), 0f)
+                if (p.x in btnLeft..(btnLeft + g.dp(180))) return Hit.AudioSlot
+            }
         }
         return Hit.None
     }
@@ -375,57 +524,93 @@ private fun DrawScope.drawTimeline(s: TlState, measurer: TextMeasurer, pending: 
         t += stepMs
     }
 
-    // слоты дорожек: текст, субтитры, аудио
+    // слоты дорожек: наложения, текст, субтитры, аудио (плотно подогнаны без лишних дыр)
     val slotFrom = g.x(0)
     val slotLeft = max(slotFrom, -g.corner)
     fun slot(top: Float, label: String?) {
         drawRoundRect(BaseColors.DarkSlot, Offset(slotLeft, top), Size(max(0f, g.width - slotLeft + g.corner), g.slotH), CornerRadius(g.corner))
-        if (label != null) safeText(measurer, label, Offset(max(slotFrom, 0f) + 16.dp.toPx(), top + 11.dp.toPx()), TextStyle(color = Color.White.copy(alpha = .85f), fontSize = 14.sp))
+        if (label != null) {
+            val plusStyle = TextStyle(color = Color.White.copy(alpha = .95f), fontSize = 17.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+            val labelStyle = TextStyle(color = Color.White.copy(alpha = .85f), fontSize = 13.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium)
+            val plusLayout = measurer.measure("+", plusStyle)
+            val textOnly = label.removePrefix("+").trimStart()
+            val textLayout = measurer.measure(textOnly, labelStyle)
+            val startX = max(slotFrom, 0f) + 16.dp.toPx()
+            val plusY = top + (g.slotH - plusLayout.size.height) / 2f
+            val textY = top + (g.slotH - textLayout.size.height) / 2f
+            drawText(plusLayout, topLeft = Offset(startX, plusY))
+            drawText(textLayout, topLeft = Offset(startX + plusLayout.size.width + 6.dp.toPx(), textY))
+        }
     }
+    if (s.overlayClips.isNotEmpty()) slot(g.overlayTop, null)
     slot(g.textTop, if (s.texts.isEmpty()) "+  Добавить текст" else null)
-    slot(g.capTop, if (s.captions.isEmpty()) "Субтитры" else null)
-    slot(g.overlayTop, if (s.overlayClips.isEmpty()) "+  Добавить наложение (фото/видео)" else null)
+    if (s.captions.isNotEmpty()) slot(g.capTop, null)
     slot(g.audioTop, if (s.audioClips.isEmpty()) "+  Добавить аудио" else null)
 
-    fun block(top: Float, l: Float, r: Float, color: Color, label: String) {
+    fun block(top: Float, l: Float, r: Float, color: Color, label: String, isAudio: Boolean = false) {
         if (r < -20f || l > g.width + 20f || r - l < 2f) return
-        drawRoundRect(color, Offset(l, top + 4.dp.toPx()), Size(max(2f, r - l - 2f), g.slotH - 8.dp.toPx()), CornerRadius(6.dp.toPx()))
-        // подпись — только если блок достаточно широк и хоть частично виден
-        if (r - l > 36.dp.toPx() && r > 0f && l < g.width) {
+        val corner = 5.dp.toPx()
+        val y = top + 2.dp.toPx()
+        val hgt = g.slotH - 4.dp.toPx()
+        val w = max(2f, r - l)
+        drawRoundRect(color, Offset(l, y), Size(w, hgt), CornerRadius(corner))
+        // декоративные волны на блоке аудио (Photo 1)
+        if (isAudio && w > 24.dp.toPx()) {
+            val waveColor = Color.White.copy(alpha = 0.28f)
+            val step = 6.dp.toPx()
+            var wx = l + 8.dp.toPx()
+            val cy = y + hgt / 2f
+            while (wx < r - 8.dp.toPx()) {
+                val waveH = (kotlin.math.sin(wx * 0.15f).toFloat().let { kotlin.math.abs(it) } * 10.dp.toPx() + 4.dp.toPx()).coerceAtMost(hgt - 6.dp.toPx())
+                drawLine(waveColor, Offset(wx, cy - waveH / 2f), Offset(wx, cy + waveH / 2f), 2.dp.toPx(), cap = StrokeCap.Round)
+                wx += step
+            }
+        }
+        // подпись — белая, четкая, ровно посередине по вертикали
+        if (w > 32.dp.toPx() && r > 0f && l < g.width) {
             clipRect(left = max(l, 0f), top = top, right = min(r, g.width), bottom = top + g.slotH) {
-                safeText(measurer, label, Offset(max(l, 0f) + 6.dp.toPx(), top + 11.dp.toPx()), TextStyle(color = Color.White, fontSize = 12.sp))
+                val style = TextStyle(color = Color.White, fontSize = 12.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium)
+                val m = measurer.measure(label, style)
+                val textY = top + (g.slotH - m.size.height) / 2f
+                drawText(m, topLeft = Offset(max(l, 0f) + 8.dp.toPx(), textY))
             }
         }
     }
-    // рамка и белые ручки обрезки у выделенного блока (общий вид для текста, субтитров и аудио)
-    fun handles(top: Float, l: Float, r: Float) {
+
+    // рамка и детальные белые ручки обрезки с тёмной полоской внутри (Photo 2)
+    fun handles(top: Float, hgt: Float, l: Float, r: Float) {
         if (r - l <= 8f) return
         val hw = min(g.handleW, (r - l) / 4)
-        val y = top + 4.dp.toPx(); val hgt = g.slotH - 8.dp.toPx()
-        drawRoundRect(Color.White, Offset(l, y), Size(max(2f, r - l - 2f), hgt), CornerRadius(6.dp.toPx()), Stroke(2.dp.toPx()))
-        drawRoundRect(Color.White, Offset(l, y), Size(hw, hgt), CornerRadius(4.dp.toPx()))
-        drawRoundRect(Color.White, Offset(r - hw - 2f, y), Size(hw, hgt), CornerRadius(4.dp.toPx()))
+        val stroke = 2.dp.toPx()
+        val corner = 4.dp.toPx()
+        val w = max(2f, r - l)
+        drawRoundRect(Color.White, Offset(l, top), Size(w, hgt), CornerRadius(corner), Stroke(stroke))
+        drawRoundRect(Color.White, Offset(l, top), Size(hw, hgt), CornerRadius(corner))
+        drawRoundRect(Color.White, Offset(r - hw, top), Size(hw, hgt), CornerRadius(corner))
+        val grip = Color(0xFF333333)
+        val cy = top + hgt / 2f
+        val barH = min(hgt * 0.45f, 15.dp.toPx())
+        val strokeW = 2.2.dp.toPx()
+        drawLine(grip, Offset(l + hw / 2f, cy - barH / 2f), Offset(l + hw / 2f, cy + barH / 2f), strokeW, cap = StrokeCap.Round)
+        drawLine(grip, Offset(r - hw / 2f, cy - barH / 2f), Offset(r - hw / 2f, cy + barH / 2f), strokeW, cap = StrokeCap.Round)
     }
+
     s.texts.forEach { t ->
-        block(g.textTop, g.x(t.startMs), g.x(t.endMs), Color(0xFFFF9800).copy(alpha = .55f), t.text)
-        if (t.id == s.selectedTextId) handles(g.textTop, g.x(t.startMs), g.x(t.endMs))
+        block(g.textTop, g.x(t.startMs), g.x(t.endMs), Color(0xFFE65100), t.text)
+        if (t.id == s.selectedTextId) handles(g.textTop + 2.dp.toPx(), g.slotH - 4.dp.toPx(), g.x(t.startMs), g.x(t.endMs))
     }
     s.captions.forEach { c ->
-        block(g.capTop, g.x(c.startMs), g.x(c.endMs), BaseColors.Accent.copy(alpha = .55f), c.text)
-        if (c.id == s.selectedCaptionId) handles(g.capTop, g.x(c.startMs), g.x(c.endMs))
+        block(g.capTop, g.x(c.startMs), g.x(c.endMs), Color(0xFFF57C00), c.text)
+        if (c.id == s.selectedCaptionId) handles(g.capTop + 2.dp.toPx(), g.slotH - 4.dp.toPx(), g.x(c.startMs), g.x(c.endMs))
     }
 
     // блоки музыки на аудиодорожке: имя файла + длительность; выбранный — с рамкой и ручками обрезки
     s.audioClips.forEach { c ->
         val l = g.x(c.startMs); val r = g.x(c.endMs)
         val name = c.uri.substringAfterLast('/').substringBeforeLast('.').ifBlank { "Музыка" }
-        block(g.audioTop, l, r, Color(0xFF9C4DCC).copy(alpha = .55f), "♪ $name · ${Format.duration(c.lengthMs)}")
+        block(g.audioTop, l, r, Color(0xFF00897B), "♪ $name · ${Format.duration(c.lengthMs)}", isAudio = true)
         if (c.id == s.selectedId && r - l > 8f) {
-            val hw = min(g.handleW, (r - l) / 4)
-            val top = g.audioTop + 4.dp.toPx(); val hgt = g.slotH - 8.dp.toPx()
-            drawRoundRect(Color.White, Offset(l, top), Size(max(2f, r - l - 2f), hgt), CornerRadius(6.dp.toPx()), Stroke(2.dp.toPx()))
-            drawRoundRect(Color.White, Offset(l, top), Size(hw, hgt), CornerRadius(4.dp.toPx()))
-            drawRoundRect(Color.White, Offset(r - hw - 2f, top), Size(hw, hgt), CornerRadius(4.dp.toPx()))
+            handles(g.audioTop + 2.dp.toPx(), g.slotH - 4.dp.toPx(), l, r)
         }
     }
 
@@ -433,8 +618,8 @@ private fun DrawScope.drawTimeline(s: TlState, measurer: TextMeasurer, pending: 
     s.overlayClips.forEach { c ->
         val l = g.x(c.startMs); val r = g.x(c.endMs)
         val name = c.uri.substringAfterLast('/').substringBeforeLast('.').ifBlank { "Наложение" }
-        block(g.overlayTop, l, r, Color(0xFF2EC4B6).copy(alpha = .55f), (if (c.type == MediaType.IMAGE) "▣ " else "▶ ") + "$name · ${Format.duration(c.lengthMs)}")
-        if (c.id == s.selectedId) handles(g.overlayTop, l, r)
+        block(g.overlayTop, l, r, Color(0xFF5E35B1), (if (c.type == MediaType.IMAGE) "▣ " else "▶ ") + "$name · ${Format.duration(c.lengthMs)}")
+        if (c.id == s.selectedId) handles(g.overlayTop + 2.dp.toPx(), g.slotH - 4.dp.toPx(), l, r)
     }
 
     // клипы основной дорожки
@@ -469,19 +654,13 @@ private fun DrawScope.drawTimeline(s: TlState, measurer: TextMeasurer, pending: 
 
         if (c.id == s.selectedId) {
             val hw = min(g.handleW, (r - l) / 4)
-            val stroke = 2.5.dp.toPx()
-            drawRoundRect(Color.White, rect.topLeft, rect.size, CornerRadius(g.corner), Stroke(stroke))
-            drawRoundRect(Color.White, Offset(l, g.mainTop), Size(hw, g.mainH), CornerRadius(g.corner))
-            drawRoundRect(Color.White, Offset(r - hw, g.mainTop), Size(hw, g.mainH), CornerRadius(g.corner))
-            val grip = Color(0xFF333333)
-            drawLine(grip, Offset(l + hw / 2, g.mainTop + 22.dp.toPx()), Offset(l + hw / 2, g.mainTop + g.mainH - 22.dp.toPx()), 2.dp.toPx())
-            drawLine(grip, Offset(r - hw / 2, g.mainTop + 22.dp.toPx()), Offset(r - hw / 2, g.mainTop + g.mainH - 22.dp.toPx()), 2.dp.toPx())
+            handles(g.mainTop, g.mainH, l, r)
             // длительность
             val label = "%.1fs".format(c.lengthMs / 1000f)
-            val m = measurer.measure(label, TextStyle(color = Color.White, fontSize = 12.sp))
+            val m = measurer.measure(label, TextStyle(color = Color.White, fontSize = 12.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium))
             val bx = max(l + hw + 6.dp.toPx(), 6.dp.toPx()).coerceAtMost(r - hw - m.size.width - 14.dp.toPx())
             if (bx > l) {
-                drawRoundRect(Color.Black.copy(alpha = .55f), Offset(bx, g.mainTop + 5.dp.toPx()), Size(m.size.width + 10.dp.toPx(), m.size.height + 4.dp.toPx()), CornerRadius(5.dp.toPx()))
+                drawRoundRect(Color.Black.copy(alpha = .65f), Offset(bx, g.mainTop + 5.dp.toPx()), Size(m.size.width + 10.dp.toPx(), m.size.height + 4.dp.toPx()), CornerRadius(5.dp.toPx()))
                 drawText(m, topLeft = Offset(bx + 5.dp.toPx(), g.mainTop + 7.dp.toPx()))
             }
         }

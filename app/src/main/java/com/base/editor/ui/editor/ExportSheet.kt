@@ -64,10 +64,7 @@ fun ExportSheet(durationMs: Long, initialResolution: String, initialFps: Int, on
                     .padding(vertical = 16.dp),
                 contentAlignment = Alignment.Center,
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Начать рендер", color = Color.Black, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-                    Text("  ·  ≈ ${formatSize(mb)}", color = Color.Black.copy(alpha = .65f), fontSize = 15.sp)
-                }
+                Text("Экспортировать", color = Color.Black, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
             }
             Spacer(Modifier.height(16.dp))
         }

@@ -45,7 +45,7 @@ vec4 transition(vec2 uv) {
     float dissolve = Exponential_easeInOut(0.0, 1.0, 1.0, progress);
 
     // Mirrored sinusoidal loop. 0->strength then strength->0
-    float strength = Sinusoidal_easeInOut(0.0, strength, 0.5, progress);
+    float str = Sinusoidal_easeInOut(0.0, strength, 0.5, progress);
 
     vec4 color = vec4(0.0);
     float total = 0.0;
@@ -54,10 +54,11 @@ vec4 transition(vec2 uv) {
     /* randomize the lookup values to hide the fixed number of samples */
     float offset = rand(uv);
 
-    for (float t = 0.0; t <= 40.0; t++) {
-        float percent = (t + offset) / 40.0;
+    const int SAMPLES = 16;
+    for (int i = 0; i <= SAMPLES; i++) {
+        float percent = (float(i) + offset) / float(SAMPLES);
         float weight = 4.0 * (percent - percent * percent);
-        color += crossFade(texCoord + toCenter * percent * strength, dissolve) * weight;
+        color += crossFade(texCoord + toCenter * percent * str, dissolve) * weight;
         total += weight;
     }
     return color / total;

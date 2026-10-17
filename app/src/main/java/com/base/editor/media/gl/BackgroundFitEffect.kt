@@ -33,16 +33,18 @@ class BackgroundFitEffect(
     private val canvasW: Int, private val canvasH: Int,
     private val bgArgb: Int?,                         // null — размытое видео
     private val blurRadius: () -> Float = { 1.0f },
+    private val transparentBg: Boolean = false,
     private val transform: (Long) -> Matrix,
 ) : GlEffect {
     override fun toGlShaderProgram(context: Context, useHdr: Boolean): GlShaderProgram =
-        try { BgFitProgram(canvasW, canvasH, bgArgb, blurRadius, transform, useHdr) } catch (e: GlUtil.GlException) { throw VideoFrameProcessingException(e) }
+        try { BgFitProgram(canvasW, canvasH, bgArgb, blurRadius, transparentBg, transform, useHdr) } catch (e: GlUtil.GlException) { throw VideoFrameProcessingException(e) }
 }
 
 @UnstableApi
 private class BgFitProgram(
     private val cw: Int, private val ch: Int, private val bgArgb: Int?,
     private val blurRadius: () -> Float,
+    private val transparentBg: Boolean,
     private val transform: (Long) -> Matrix, useHdr: Boolean,
 ) : BaseGlShaderProgram(useHdr, 1) {
     private val program: GlProgram? = try {
@@ -71,7 +73,8 @@ private class BgFitProgram(
             p.setFloatsUniform("uInv1", floatArrayOf(v[Matrix.MSKEW_Y], v[Matrix.MSCALE_Y], v[Matrix.MTRANS_Y]))
             p.setFloatsUniform("uFit", floatArrayOf(fx, fy))
             p.setFloatsUniform("uCover", floatArrayOf(cover0, cover1))
-            p.setIntUniform("uBlurBg", if (bgArgb == null) 1 else 0)
+            p.setIntUniform("uBlurBg", if (bgArgb == null && !transparentBg) 1 else 0)
+            p.setIntUniform("uTransparentBg", if (transparentBg) 1 else 0)
             p.setFloatUniform("uBlurRadius", blurRadius().coerceIn(0.1f, 4.0f))
             val c = bgArgb ?: 0xFF000000.toInt()
             p.setFloatsUniform("uBgColor", floatArrayOf(((c shr 16) and 0xFF) / 255f, ((c shr 8) and 0xFF) / 255f, (c and 0xFF) / 255f))
@@ -95,6 +98,7 @@ uniform vec3 uInv1;
 uniform vec2 uFit;
 uniform vec2 uCover;
 uniform int uBlurBg;
+uniform int uTransparentBg;
 uniform float uBlurRadius;
 uniform vec3 uBgColor;
 uniform float uEdge;
@@ -106,6 +110,12 @@ void main() {
   vec2 p = vec2(dot(uInv0.xy, q) + uInv0.z, dot(uInv1.xy, q) + uInv1.z);   // обратное положение клипа → «вписанный» холст
   vec2 f = p / uFit;                                          // −1..1 внутри кадра
   float inside = clamp(min(1.0 - abs(f.x), 1.0 - abs(f.y)) * uEdge, 0.0, 1.0);
+
+  if (uTransparentBg == 1) {
+    vec3 fg = texture(uTex, clamp(f * 0.5 + 0.5, 0.0, 1.0)).rgb;
+    outColor = vec4(fg, inside);
+    return;
+  }
 
   vec3 bg = uBgColor;
   if (uBlurBg == 1) {
